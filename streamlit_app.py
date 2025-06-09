@@ -291,31 +291,50 @@ st.set_page_config(
 
 # Sidebar Navigation
 with st.sidebar:
-    st.title("🔋 Navigation")
+    st.title("🔋 Energy Analysis")
     st.markdown("---")
     
-    # Navigation info
+    # Show current page
+    st.info("📍 **Current Page:** Home")
+    
     st.markdown("""
-    **📊 Available Analysis:**
+    **📊 Available Pages:**
     
-    🏠 **Home** - Platform overview & system status
+    Use the page selector above ⬆️ to navigate:
     
-    📊 **Historical OI** - Natural Gas futures historical analysis
-    
-    🔮 **Future Contracts** - Active NG contract comparisons  
-    
-    ⚡ **Texas Generation** - Hourly electricity generation data
+    • **📊 Historical_OI** - NG futures historical analysis
+    • **🔮 Future_Contracts** - Active NG contract comparisons  
+    • **⚡ Texas_Generation** - Hourly electricity generation data
     
     ---
     
-    **💡 Quick Tips:**
-    • Use time-to-expiry for contract comparisons
+    **💡 Navigation Tips:**
+    • Pages are listed in the sidebar above
+    • Click any page name to switch
     • Data updates hourly automatically
-    • Export functionality available
+    • Each page has specialized tools
     """)
+    
+    # Quick reference
+    st.markdown("---")
+    st.subheader("📅 NG Month Codes")
+    month_codes = {
+        "F": "Jan", "G": "Feb", "H": "Mar", "J": "Apr",
+        "K": "May", "M": "Jun", "N": "Jul", "Q": "Aug", 
+        "U": "Sep", "V": "Oct", "X": "Nov", "Z": "Dec"
+    }
+    
+    for code, month in month_codes.items():
+        st.write(f"**{code}** = {month}")
 
 st.title("⚡ Energy Analysis Platform")
 st.markdown("---")
+
+# Navigation instructions
+st.info("""
+🧭 **How to Navigate:** Use the page selector in the **left sidebar** above to access different analysis tools. 
+Each page provides specialized functionality for energy market analysis.
+""")
 
 # Welcome section
 col1, col2 = st.columns([2, 1])
@@ -329,28 +348,31 @@ with col1:
     ### 📊 Analysis Modules:
     
     **📈 Natural Gas Futures Analysis:**
-    - **Historical Open Interest** - Time-to-expiry overlays for expired contracts
-    - **Future Contracts** - Active contract comparisons and arbitrage analysis
+    - **📊 Historical Open Interest** - Time-to-expiry overlays for expired contracts
+    - **🔮 Future Contracts** - Active contract comparisons and arbitrage analysis
     
     **⚡ Electricity Generation Analysis:**
-    - **Regional Generation Data** - Hourly electricity generation by source
-    - **Load Demand Analysis** - Power consumption patterns and trends
+    - **⚡ Texas Generation** - Hourly electricity generation by source and region
+    - **📈 Load Demand Analysis** - Power consumption patterns and trends
     
     ### 🚀 Getting Started:
-    Navigate using the **sidebar** to access different analysis modules. Each page provides specialized tools for understanding energy market dynamics.
+    1. **Click on a page** in the sidebar navigation above ⬆️
+    2. **Select your analysis type** (Historical, Future, or Generation)
+    3. **Choose contracts or regions** using the page controls
+    4. **Analyze the interactive charts** and download data as needed
     """)
 
 with col2:
-    st.info("""
+    st.success("""
     **📋 Platform Features:**
     
-    • Real-time database connectivity
-    • Hourly automated data updates
-    • Interactive time-series visualizations
-    • Cross-year contract comparisons
-    • Generation source breakdowns
-    • Export capabilities
-    • Time-to-expiry analysis
+    ✅ Real-time database connectivity  
+    ✅ Hourly automated data updates  
+    ✅ Interactive time-series visualizations  
+    ✅ Cross-year contract comparisons  
+    ✅ Generation source breakdowns  
+    ✅ Export capabilities  
+    ✅ Time-to-expiry analysis  
     """)
 
 # Database connection check
@@ -392,19 +414,7 @@ try:
 except Exception as e:
     st.error(f"❌ Database connection failed: {e}")
 
-# Natural Gas Futures month codes reference
-st.markdown("---")
-st.subheader("📅 Natural Gas Futures Month Codes Reference")
-
-cols = st.columns(6)
-months_per_col = 2
-
-for i, (month_num, code) in enumerate(FUTURES_MONTH_CODES.items()):
-    col_idx = i // months_per_col
-    with cols[col_idx]:
-        st.write(f"**{code}** - {calendar.month_name[month_num]}")
-
-# Recent activity / quick stats
+# Quick Market Overview
 st.markdown("---")
 st.subheader("📈 Quick Market Overview")
 
