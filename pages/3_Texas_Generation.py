@@ -117,6 +117,21 @@ if not generation_tables:
 
 # Sidebar controls
 with st.sidebar:
+    st.title("🧭 Navigation")
+    
+    # Navigation buttons
+    if st.button("🏠 Home", use_container_width=True):
+        st.switch_page("streamlit_app.py")
+    
+    if st.button("📊 Historical OI", use_container_width=True):
+        st.switch_page("pages/1_Historical_OI.py")
+        
+    if st.button("🔮 Future Contracts", use_container_width=True):
+        st.switch_page("pages/2_Future_Contracts.py")
+    
+    st.markdown("---")
+    st.info("📍 **Current Page:** Texas Generation")
+    
     st.subheader("📊 Analysis Controls")
     
     # Table selection

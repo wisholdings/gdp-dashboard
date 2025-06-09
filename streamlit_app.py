@@ -294,25 +294,29 @@ with st.sidebar:
     st.title("🔋 Energy Analysis")
     st.markdown("---")
     
-    # Show current page
+    # Manual Navigation Buttons
+    st.subheader("🧭 Navigation")
+    
+    if st.button("📊 Historical Open Interest", use_container_width=True):
+        st.switch_page("pages/1_Historical_OI.py")
+    
+    if st.button("🔮 Future Contracts", use_container_width=True):
+        st.switch_page("pages/2_Future_Contracts.py")
+        
+    if st.button("⚡ Texas Generation", use_container_width=True):
+        st.switch_page("pages/3_Texas_Generation.py")
+    
+    st.markdown("---")
+    
+    # Current page indicator
     st.info("📍 **Current Page:** Home")
     
     st.markdown("""
-    **📊 Available Pages:**
-    
-    Use the page selector above ⬆️ to navigate:
-    
-    • **📊 Historical_OI** - NG futures historical analysis
-    • **🔮 Future_Contracts** - Active NG contract comparisons  
-    • **⚡ Texas_Generation** - Hourly electricity generation data
-    
-    ---
-    
     **💡 Navigation Tips:**
-    • Pages are listed in the sidebar above
-    • Click any page name to switch
+    • Click the buttons above to switch pages
+    • Each page has specialized analysis tools
     • Data updates hourly automatically
-    • Each page has specialized tools
+    • Use the Home button in each page to return here
     """)
     
     # Quick reference
@@ -331,12 +335,31 @@ st.title("⚡ Energy Analysis Platform")
 st.markdown("---")
 
 # Navigation instructions
-st.info("""
-🧭 **How to Navigate:** Use the page selector in the **left sidebar** above to access different analysis tools. 
-Each page provides specialized functionality for energy market analysis.
+st.success("""
+🧭 **How to Navigate:** Use the **navigation buttons** in the left sidebar to access different analysis tools. 
+Click any button to switch to that page's specialized functionality.
 """)
 
-# Welcome section
+# Quick access buttons in main area too
+st.subheader("🚀 Quick Access")
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    if st.button("📊 Go to Historical OI Analysis", use_container_width=True):
+        st.switch_page("pages/1_Historical_OI.py")
+    st.write("Analyze expired NG contracts using time-to-expiry overlays")
+
+with col2:
+    if st.button("🔮 Go to Future Contracts", use_container_width=True):
+        st.switch_page("pages/2_Future_Contracts.py")
+    st.write("Compare active contracts and identify arbitrage opportunities")
+
+with col3:
+    if st.button("⚡ Go to Generation Analysis", use_container_width=True):
+        st.switch_page("pages/3_Texas_Generation.py")
+    st.write("Explore hourly electricity generation by source and region")
+
+st.markdown("---")
 col1, col2 = st.columns([2, 1])
 
 with col1:
