@@ -298,7 +298,7 @@ else:
                 st.subheader(f"Historical Overlay for {calendar.month_name[selected_contract['month_num']]} Delivery Contracts")
                 
                 # Get all contracts for the same month
-                same_month_contracts = get_future_contracts_for_same_month(
+                same_month_contracts = get_contracts_for_same_month(
                     selected_contract['month_num'], 
                     selected_contract['year']
                 )
@@ -531,8 +531,12 @@ else:
                     for contract in same_month_future_contracts:
                         df_contract = get_contract_data_from_db(contract['table_name'])
                         if not df_contract.empty:
-                            current_oi = df_contract['open_interest'].iloc[-1] if df_contract['open_interest'].notna().any() else 0
-                            current_price = df_contract['settlement_price'].iloc[-1] if df_contract['settlement_price'].notna().any() else 0
+                            # Get most recent non-null values instead of just the last row
+                            valid_oi = df_contract['open_interest'].dropna()
+                            valid_price = df_contract['settlement_price'].dropna()
+                            
+                            current_oi = valid_oi.iloc[-1] if not valid_oi.empty else 0
+                            current_price = valid_price.iloc[-1] if not valid_price.empty else 0
                             data_points = len(df_contract)
                             days_remaining = (contract['expiry_date'] - datetime.now().date()).days
                             
