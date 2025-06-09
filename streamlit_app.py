@@ -283,13 +283,38 @@ if not st.session_state['authenticated']:
 
 # Main page configuration
 st.set_page_config(
-    page_title="NG Futures Analysis",
-    page_icon="📈",
+    page_title="Energy Analysis Platform",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("🔥 Natural Gas Futures Analysis Platform")
+# Sidebar Navigation
+with st.sidebar:
+    st.title("🔋 Navigation")
+    st.markdown("---")
+    
+    # Navigation info
+    st.markdown("""
+    **📊 Available Analysis:**
+    
+    🏠 **Home** - Platform overview & system status
+    
+    📊 **Historical OI** - Natural Gas futures historical analysis
+    
+    🔮 **Future Contracts** - Active NG contract comparisons  
+    
+    ⚡ **Texas Generation** - Hourly electricity generation data
+    
+    ---
+    
+    **💡 Quick Tips:**
+    • Use time-to-expiry for contract comparisons
+    • Data updates hourly automatically
+    • Export functionality available
+    """)
+
+st.title("⚡ Energy Analysis Platform")
 st.markdown("---")
 
 # Welcome section
@@ -297,28 +322,35 @@ col1, col2 = st.columns([2, 1])
 
 with col1:
     st.markdown("""
-    ## Welcome to the NG Futures Analysis Platform
+    ## Welcome to the Energy Analysis Platform
     
-    This application provides comprehensive analysis tools for Natural Gas futures contracts:
+    This application provides comprehensive analysis tools for energy markets:
     
-    ### 📊 Available Analysis Tools:
+    ### 📊 Analysis Modules:
     
-    **🕰️ Historical Open Interest** - Analyze expired contracts using time-to-expiry overlays to identify patterns across years for the same delivery month.
+    **📈 Natural Gas Futures Analysis:**
+    - **Historical Open Interest** - Time-to-expiry overlays for expired contracts
+    - **Future Contracts** - Active contract comparisons and arbitrage analysis
     
-    **🔮 Future Contracts** - Compare active contracts from the same delivery month across different years to spot opportunities and trends.
+    **⚡ Electricity Generation Analysis:**
+    - **Regional Generation Data** - Hourly electricity generation by source
+    - **Load Demand Analysis** - Power consumption patterns and trends
     
     ### 🚀 Getting Started:
-    Use the sidebar navigation to access different analysis pages. Each page provides specialized tools for understanding Natural Gas futures market dynamics.
+    Navigate using the **sidebar** to access different analysis modules. Each page provides specialized tools for understanding energy market dynamics.
     """)
 
 with col2:
     st.info("""
-    **📋 Quick Tips:**
+    **📋 Platform Features:**
     
-    • Data refreshes hourly from the database
-    • Time-to-expiry analysis reveals seasonal patterns
-    • Compare contracts across multiple years
-    • Export data for further analysis
+    • Real-time database connectivity
+    • Hourly automated data updates
+    • Interactive time-series visualizations
+    • Cross-year contract comparisons
+    • Generation source breakdowns
+    • Export capabilities
+    • Time-to-expiry analysis
     """)
 
 # Database connection check
@@ -328,28 +360,41 @@ st.subheader("🔗 System Status")
 try:
     engine = get_db_engine()
     if engine:
-        # Get some basic stats
-        all_tables = get_all_contract_table_names(PRODUCT_SYMBOL)
+        # Get Natural Gas contracts stats
+        all_ng_tables = get_all_contract_table_names(PRODUCT_SYMBOL)
         historical_count = len(get_historical_contracts_only())
         future_count = len(get_future_contracts_only())
         
-        col1, col2, col3, col4 = st.columns(4)
+        # Get generation tables stats
+        inspector = inspect(engine)
+        all_table_names = inspector.get_table_names()
+        generation_tables = [t for t in all_table_names if t.endswith('_hourly_generation')]
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric("Database Status", "✅ Connected")
         with col2:
-            st.metric("Total Contracts", len(all_tables))
+            st.metric("NG Contracts", len(all_ng_tables))
         with col3:
-            st.metric("Historical Contracts", historical_count)
+            st.metric("Historical", historical_count)
         with col4:
-            st.metric("Future Contracts", future_count)
+            st.metric("Future", future_count)
+        with col5:
+            st.metric("Generation Tables", len(generation_tables))
+            
+        # Show available generation regions
+        if generation_tables:
+            st.markdown("### 🗺️ Available Generation Regions:")
+            regions = [t.replace('_hourly_generation', '').replace('_', ' ').title() for t in generation_tables]
+            st.write(", ".join(regions))
             
 except Exception as e:
     st.error(f"❌ Database connection failed: {e}")
 
-# Futures month codes reference
+# Natural Gas Futures month codes reference
 st.markdown("---")
-st.subheader("📅 Futures Month Codes Reference")
+st.subheader("📅 Natural Gas Futures Month Codes Reference")
 
 cols = st.columns(6)
 months_per_col = 2
@@ -359,6 +404,38 @@ for i, (month_num, code) in enumerate(FUTURES_MONTH_CODES.items()):
     with cols[col_idx]:
         st.write(f"**{code}** - {calendar.month_name[month_num]}")
 
+# Recent activity / quick stats
 st.markdown("---")
-st.markdown("**💾 Data Source:** Databento via automated ingestion script")
-st.markdown("**⚡ Last Updated:** Data refreshes automatically every hour")
+st.subheader("📈 Quick Market Overview")
+
+try:
+    # Get some recent data for display
+    recent_contracts = get_future_contracts_only()[:3]  # Next 3 expiring contracts
+    
+    if recent_contracts:
+        st.markdown("**🔮 Next Expiring NG Contracts:**")
+        for contract in recent_contracts:
+            days_remaining = (contract['expiry_date'] - datetime.now().date()).days
+            st.write(f"• **{contract['symbol']}** expires in {days_remaining} days ({contract['expiry_date']})")
+    
+    # Show generation data availability
+    if generation_tables:
+        st.markdown("**⚡ Generation Data Coverage:**")
+        sample_table = generation_tables[0]  # Check first table for date range
+        try:
+            sample_query = f"SELECT MIN(timestamp) as min_date, MAX(timestamp) as max_date FROM `{sample_table}`"
+            with engine.connect() as conn:
+                result = conn.execute(text(sample_query)).fetchone()
+                if result:
+                    min_date = result[0]
+                    max_date = result[1]
+                    if min_date and max_date:
+                        st.write(f"• Data available from {min_date.date()} to {max_date.date()}")
+        except:
+            st.write("• Generation data tables available")
+            
+except Exception as e:
+    st.write("Unable to load quick stats")
+
+st.markdown("---")
+st.markdown("**💾 Data Sources:** Databento (NG Futures) | EIA (Generation) | **🔄 Updates:** Every hour")
