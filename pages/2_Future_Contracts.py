@@ -185,8 +185,8 @@ with st.sidebar:
     if st.button("📊 Historical OI", use_container_width=True):
         st.switch_page("pages/1_Historical_OI.py")
         
-    if st.button("⚡ Texas Generation", use_container_width=True):
-        st.switch_page("pages/3_Texas_Generation.py")
+    if st.button("⚡ EIA Generation", use_container_width=True):
+        st.switch_page("pages/3_EIA_Generation.py")
     
     st.markdown("---")
     st.info("📍 **Current Page:** Future Contracts")
