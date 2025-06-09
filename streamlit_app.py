@@ -303,8 +303,8 @@ with st.sidebar:
     if st.button("🔮 Future Contracts", use_container_width=True):
         st.switch_page("pages/2_Future_Contracts.py")
         
-    if st.button("⚡ Texas Generation", use_container_width=True):
-        st.switch_page("pages/3_Texas_Generation.py")
+    if st.button("⚡ EIA Generation", use_container_width=True):
+        st.switch_page("pages/3_EIA_Generation.py")
     
     st.markdown("---")
     
@@ -356,7 +356,7 @@ with col2:
 
 with col3:
     if st.button("⚡ Go to Generation Analysis", use_container_width=True):
-        st.switch_page("pages/3_Texas_Generation.py")
+        st.switch_page("pages/3_EIA_Generation.py")
     st.write("Explore hourly electricity generation by source and region")
 
 st.markdown("---")
@@ -375,7 +375,7 @@ with col1:
     - **🔮 Future Contracts** - Active contract comparisons and arbitrage analysis
     
     **⚡ Electricity Generation Analysis:**
-    - **⚡ Texas Generation** - Hourly electricity generation by source and region
+    - **⚡ EIA Generation** - Hourly electricity generation by source and region
     - **📈 Load Demand Analysis** - Power consumption patterns and trends
     
     ### 🚀 Getting Started:
