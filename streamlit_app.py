@@ -5,8 +5,9 @@ import re
 from dateutil.relativedelta import relativedelta
 import calendar
 import plotly.express as px
+import plotly.graph_objects as go # Added for potential dual-axis or more complex plots
 import numpy as np
-import os # Still import os, but won't use for credentials here
+import os 
 
 # Import SQLAlchemy components
 from sqlalchemy import create_engine, inspect, text 
@@ -16,12 +17,11 @@ import mysql.connector
 # --- HARDCODED DATABASE CREDENTIALS (FOR TESTING ONLY) ---
 # >>> REMOVE THESE FOR PRODUCTION OR USE ENVIRONMENT VARIABLES/SECRET MANAGER <<<
 # >>> THESE CREDENTIALS AND THE IP WHITELISTING (0.0.0.0/0) ARE SECURITY RISKS IF LEFT PUBLIC <<<
-# IMPORTANT: This must be your Cloud SQL Instance's PUBLIC IP Address.
 HARDCODED_DB_HOST = "34.66.61.153" 
 HARDCODED_DB_DATABASE = "test"
 HARDCODED_DB_USER = "root"
 HARDCODED_DB_PASSWORD = "TrumpMick2024!!" # Your actual DB password
-HARDCODED_DB_PORT = 3306 # Standard MySQL port
+HARDCODED_DB_PORT = 3306 
 # -------------------------------------------------------------------------------
 
 # Constants for contract generation
@@ -48,19 +48,14 @@ def get_db_engine():
         
         # Test connection by executing a simple query
         with engine.connect() as connection:
-            result = connection.execute(text("SELECT CURRENT_DATE()")).scalar()
+            connection.execute(text("SELECT 1")).scalar() # Just a simple test, no need for result
         
-        # st.success(f"Database connection established. Current DB date: {result}") # Optional success message
         return engine
     except Exception as e:
         st.error(f"Error connecting to database. Please ensure your Cloud SQL instance is running, "
                  f"its public IP is correct, and that the environment's outbound IP is authorized (`0.0.0.0/0` if on App Engine). "
                  f"Also check database user/password are correct. Full error: {e}")
         st.stop() 
-
-def _get_last_day_of_month(year, month):
-    """Helper to get the last day of a given month."""
-    return calendar.monthrange(year, month)[1]
 
 @st.cache_data(ttl=3600) # Cache the list of generated symbols for 1 hour
 def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
@@ -77,14 +72,15 @@ def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
         year_suffix = f"{contract_y % 100:02d}"
         month_code = FUTURES_MONTH_CODES[contract_m]
         symbol_name = f"{PRODUCT_SYMBOL}{month_code}{year_suffix}"
-
+        
+        # Simplistic expiration, not strictly needed for this app, but kept for consistency
         exp_year_cand = contract_y
         exp_month_cand = contract_m - 1
         if exp_month_cand == 0: 
             exp_month_cand = 12
             exp_year_cand -= 1
         try:
-            expiration_day = _get_last_day_of_month(exp_year_cand, exp_month_cand)
+            expiration_day = calendar.monthrange(exp_year_cand, exp_month_cand)[1]
             expiration_datetime_obj = datetime(exp_year_cand, exp_month_cand, expiration_day)
         except ValueError:
             expiration_datetime_obj = datetime(contract_y, contract_m, 1) 
@@ -93,35 +89,6 @@ def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
         current_processing_date += relativedelta(months=1)
         
     return generated_contracts
-
-@st.cache_data(ttl=3600)
-def get_next_active_month_symbol(product_symbol="ng"):
-    """
-    Determines the first "next active month" contract symbol.
-    This is typically the first contract whose expiration date is in the future.
-    """
-    today = datetime.utcnow().date()
-    yesterday = today - timedelta(days=1) 
-
-    temp_contracts_details = generate_forward_contract_symbols(datetime.utcnow(), 60) 
-    
-    found_next_active_contract = None
-    for sym, y, m, exp_dt_obj in temp_contracts_details:
-        if exp_dt_obj.date() > yesterday: 
-            found_next_active_contract = (sym, y, m, exp_dt_obj)
-            break
-            
-    if found_next_active_contract:
-        return found_next_active_contract
-    else:
-        st.warning("Could not determine the next active futures contract based on expiration. Defaulting to the next calendar month.")
-        current_month_dt = datetime.utcnow() + relativedelta(months=1)
-        temp_contracts_details_fallback = generate_forward_contract_symbols(current_month_dt, 1)
-        if temp_contracts_details_fallback:
-            return temp_contracts_details_fallback[0]
-        else: 
-            return (f"{PRODUCT_SYMBOL}{FUTURES_MONTH_CODES[current_month_dt.month]}{current_month_dt.year%100:02d}", 
-                    current_month_dt.year, current_month_dt.month, current_month_dt.date())
 
 @st.cache_data(ttl=3600)
 def get_all_contract_table_names(product_symbol="ng"):
@@ -140,19 +107,24 @@ def get_all_contract_table_names(product_symbol="ng"):
 @st.cache_data(ttl=3600)
 def get_contract_data_from_db(table_name: str):
     """
-    Fetches all available data for a given contract table.
+    Fetches all available data for a given contract table, including OI and Settlement Price.
     Returns DataFrame with 'trade_date' as index, sorted ascending.
     """
     engine = get_db_engine()
     df = pd.DataFrame()
     try:
-        query = f"SELECT trade_date, open_interest FROM `{table_name.lower()}` ORDER BY trade_date ASC"
+        # Fetch OI and Settlement Price
+        query = f"SELECT trade_date, open_interest, settlement_price FROM `{table_name.lower()}` ORDER BY trade_date ASC"
             
         df = pd.read_sql_query(query, engine)
         
         if not df.empty:
-            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.date 
-            df = df.set_index('trade_date') 
+            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.date # Convert to date objects
+            df = df.set_index('trade_date') # Set trade_date as index
+            
+            # Ensure columns are numeric, coercing errors to NaN
+            df['open_interest'] = pd.to_numeric(df['open_interest'], errors='coerce')
+            df['settlement_price'] = pd.to_numeric(df['settlement_price'], errors='coerce')
         
     except Exception as e:
         st.error(f"Error fetching data for table '{table_name}': {e}")
@@ -161,26 +133,18 @@ def get_contract_data_from_db(table_name: str):
 # --- Streamlit App UI ---
 
 # --- 0. SIMPLE AUTHENTICATION STATE ---
-# Removed os.environ.get for APP_USERNAME/PASSWORD as they are not used/hardcoded in this script.
-# If you want authentication, you'd hardcode it here too or use Streamlit's secrets.toml for simplicity.
-# For now, removed to focus on DB connection first.
+# Authentication is skipped for direct DB connection test
 if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = True # Set to True to skip login for this example
+    st.session_state['authenticated'] = True 
 
-# Simplified/removed authentication for direct testing
 if not st.session_state['authenticated']:
     st.title("Login Required (Auth Disabled for Direct Test)")
     st.write("Authentication is temporarily disabled in this version for direct DB connection testing.")
     st.stop()
 else:
-    st.sidebar.success(f"Logged in (Authentication temporarily skipped).")
-    # No logout button if not actually logging in
-    # if st.sidebar.button("Logout"):
-    #     st.session_state['authenticated'] = False
-    #     st.experimental_rerun()
-
-    st.title("Natural Gas Futures Historical Open Interest")
-    st.write("Explore the historical Open Interest for specific Natural Gas futures contract months.")
+    st.set_page_config(page_title="NG Futures Historical Data")
+    st.title("Natural Gas Futures Historical Contract Data")
+    st.write("View the historical Open Interest and Settlement Price for a selected Natural Gas futures contract.")
 
     st.info(f"Data in this app is refreshed from the database every hour using `@st.cache_data`. "
             f"Your ingestion script determines how frequently the database itself is updated.")
@@ -189,117 +153,110 @@ else:
     for month_num, code in FUTURES_MONTH_CODES.items():
         st.sidebar.write(f"**{code}**: {calendar.month_name[month_num]}")
 
-    # --- SECTION: Historical Open Interest Comparison (Simplified) ---
-    st.header("Historical Open Interest Comparison")
-    st.write("Compare the Open Interest history for the same contract month across different years.")
-
-    # Establish DB connection first
+    # --- Establish DB connection ---
     engine = get_db_engine()
     if not engine: # If get_db_engine stopped the app, this won't be reached
         st.stop()
 
+    # --- Select Contract ---
     all_futures_table_names = get_all_contract_table_names(PRODUCT_SYMBOL)
     
-    available_contract_symbols_for_history = [] 
+    available_contract_symbols = [] 
     for table_name in all_futures_table_names:
+        # Assuming table names are like ng032024
         match = re.match(rf"^{PRODUCT_SYMBOL.lower()}(\d{{2}})(\d{{4}})$", table_name)
         if match:
             month_num = int(match.group(1))
             year_full = int(match.group(2))
             month_code = FUTURES_MONTH_CODES.get(month_num)
             if month_code:
+                # Format for display: NG + Month Code + 2-digit Year (e.g., NGU24 for NG Aug 2024)
                 display_symbol = f"{PRODUCT_SYMBOL}{month_code}{year_full%100:02d}"
-                available_contract_symbols_for_history.append(display_symbol)
+                available_contract_symbols.append(display_symbol)
     
-    available_contract_symbols_for_history.sort() 
+    available_contract_symbols.sort() # Sort chronologically for easy selection
+
+    if not available_contract_symbols:
+        st.warning("No Natural Gas futures contracts found in the database. Please ensure your ingestion script has successfully populated data.")
+        st.stop()
+    
+    # Determine default selection (e.g., the most recent contract or a common one)
+    # Using the last item in the sorted list as a default
+    default_selected_symbol = available_contract_symbols[-1] if available_contract_symbols else None
+
+    selected_contract_symbol = st.selectbox(
+        "Select a Futures Contract:", 
+        options=available_contract_symbols,
+        index=available_contract_symbols.index(default_selected_symbol) if default_selected_symbol else 0,
+        help="Choose a Natural Gas futures contract to view its historical data."
+    )
+
+    if selected_contract_symbol:
+        # Parse the selected symbol back to table name format (e.g., NGU24 -> ng082024)
+        match = re.match(r"([A-Z]+)([FGHJKMNQUVXZ])(\d{1,2})", selected_contract_symbol)
+        if match:
+            product, month_code, year_suffix_str = match.groups()
+            base_year_2digit = int(year_suffix_str)
+            
+            # Convert 2-digit year suffix to full year (robustly)
+            current_century = (datetime.utcnow().year // 100) * 100
+            if base_year_2digit <= (datetime.utcnow().year % 100) + 1: # Assuming years 00-current_year_last_2_digits + 1 are current century
+                full_year = current_century + base_year_2digit
+            else: # Assuming years > current_year_last_2_digits + 1 are previous century
+                full_year = (current_century - 100) + base_year_2digit
+            
+            month_num = FUTURES_MONTH_CODES_REV[month_code]
+            table_name_to_fetch = f"{PRODUCT_SYMBOL}{month_num:02d}{full_year}".lower()
+
+            df_contract_data = get_contract_data_from_db(table_name_to_fetch)
+
+            if not df_contract_data.empty:
+                st.subheader(f"Historical Data for {selected_contract_symbol}")
+
+                # Filter out NaN/zero Open Interest and Settlement Price for plotting
+                df_plot = df_contract_data.copy()
+                df_plot['open_interest'] = pd.to_numeric(df_plot['open_interest'], errors='coerce')
+                df_plot['settlement_price'] = pd.to_numeric(df_plot['settlement_price'], errors='coerce')
+                
+                df_plot_filtered_oi = df_plot[df_plot['open_interest'].notna() & (df_plot['open_interest'] != 0)].copy()
+                df_plot_filtered_settlement = df_plot[df_plot['settlement_price'].notna()].copy()
 
 
-    if not available_contract_symbols_for_history:
-        st.warning("No Natural Gas futures contracts found in the database for historical comparison. Please ensure your ingestion script has successfully populated data (e.g., from ng_futures_contract_history.db).")
-    else:
-        # get_next_active_month_symbol needs engine or should not try to connect to DB.
-        # It just uses datetime.utcnow(), so it's fine.
-        next_active_contract_tuple_for_history = get_next_active_month_symbol(datetime.utcnow()) 
-        
-        default_index_history = 0
-        if next_active_contract_tuple_for_history and next_active_contract_tuple_for_history[0] in available_contract_symbols_for_history:
-            default_index_history = available_contract_symbols_for_history.index(next_active_contract_tuple_for_history[0])
+                # --- Plot 1: Historical Open Interest ---
+                if not df_plot_filtered_oi.empty:
+                    fig_oi = px.line(df_plot_filtered_oi, 
+                                     x=df_plot_filtered_oi.index, 
+                                     y="open_interest", 
+                                     title=f"Historical Open Interest: {selected_contract_symbol}",
+                                     labels={"x": "Trade Date", "open_interest": "Open Interest"},
+                                     hover_data={"open_interest": ":,.0f", df_plot_filtered_oi.index.name: "|%Y-%m-%d"}) # Include index in hover
+                    fig_oi.update_yaxes(rangemode="tozero")
+                    st.plotly_chart(fig_oi, use_container_width=True)
+                else:
+                    st.info(f"No valid (non-zero) Open Interest data found for {selected_contract_symbol}.")
 
-        selected_reference_contract_symbol = st.selectbox(
-            "Select a Reference Contract Month (e.g., NGH25):", 
-            options=available_contract_symbols_for_history,
-            index=default_index_history,
-            help="Choose a futures contract month (e.g., NGH25 for March 2025) to compare its Open Interest history across multiple years."
-        )
+                # --- Plot 2: Historical Settlement Price ---
+                if not df_plot_filtered_settlement.empty:
+                    fig_settlement = px.line(df_plot_filtered_settlement, 
+                                              x=df_plot_filtered_settlement.index, 
+                                              y="settlement_price", 
+                                              title=f"Historical Settlement Price: {selected_contract_symbol}",
+                                              labels={"x": "Trade Date", "settlement_price": "Settlement Price"},
+                                              hover_data={"settlement_price": ":,.2f", df_plot_filtered_settlement.index.name: "|%Y-%m-%d"})
+                    fig_settlement.update_yaxes(rangemode="tozero")
+                    st.plotly_chart(fig_settlement, use_container_width=True)
+                else:
+                    st.info(f"No valid Settlement Price data found for {selected_contract_symbol}.")
 
-        num_years_to_compare = st.slider(
-            "Number of Years to Compare (including selected year):",
-            min_value=2,
-            max_value=10,
-            value=5,
-            step=1,
-            help="Select how many past years of data for the same contract month to display."
-        )
+                st.subheader("Raw Data Sample:")
+                st.dataframe(df_contract_data.head()) # Show a sample of the raw data
+                st.markdown(f"Total rows: {len(df_contract_data)}")
 
-        if selected_reference_contract_symbol:
-            match = re.match(r"([A-Z]+)([FGHJKMNQUVXZ])(\d{1,2})", selected_reference_contract_symbol)
-            if not match:
-                st.error(f"Invalid reference contract symbol format: {selected_reference_contract_symbol}")
+
             else:
-                _, month_code, year_suffix_str = match.groups()
-                base_year_2digit = int(year_suffix_str)
-                
-                current_century = (datetime.utcnow().year // 100) * 100
-                if base_year_2digit <= (datetime.utcnow().year % 100) + 1:
-                    base_year_full = current_century + base_year_2digit
-                else:
-                    base_year_full = (current_century - 100) + base_year_2digit
-                
-                comparison_data = []
-                for i in range(num_years_to_compare):
-                    comp_year_full = base_year_full - i
-                    table_name = f"{PRODUCT_SYMBOL}{FUTURES_MONTH_CODES_REV[month_code]:02d}{comp_year_full}".lower()
-                    
-                    df_contract_history = get_contract_data_from_db(table_name) # This will reuse the engine
-
-                    if not df_contract_history.empty:
-                        df_contract_history['Year'] = comp_year_full
-                        
-                        df_contract_history['Normalized Date'] = df_contract_history.index.map(lambda d: 
-                            d.replace(year=base_year_full) if not (d.month == 2 and d.day == 29 and not calendar.isleap(base_year_full))
-                            else d.replace(year=base_year_full, day=28) 
-                        )
-                        
-                        df_contract_history['open_interest'] = pd.to_numeric(df_contract_history['open_interest'], errors='coerce')
-
-                        df_contract_history_filtered = df_contract_history[df_contract_history['open_interest'].notna() & (df_contract_history['open_interest'] != 0)].copy()
-
-                        if not df_contract_history_filtered.empty:
-                            comparison_data.append(df_contract_history_filtered.reset_index()) 
-                        else:
-                            st.info(f"No valid (non-zero) OI data for {PRODUCT_SYMBOL}{month_code}{comp_year_full%100:02d} for historical comparison.")
-
-                    else:
-                        st.info(f"No data found for {PRODUCT_SYMBOL}{month_code}{comp_year_full%100:02d} (table '{table_name}') for historical comparison.")
-
-                if comparison_data:
-                    df_all_years = pd.concat(comparison_data)
-                    df_all_years = df_all_years.sort_values(by=['Normalized Date', 'Year'])
-
-                    fig_history = px.line(df_all_years, 
-                                        x="Normalized Date", 
-                                        y="open_interest", 
-                                        color="Year",
-                                        title=f"Historical Open Interest for {PRODUCT_SYMBOL}{month_code} Contracts (Normalized)", 
-                                        labels={"open_interest": "Open Interest", "Normalized Date": f"Date (Normalized to {base_year_full})"},
-                                        hover_data={"trade_date": "|%Y-%m-%d", "open_interest": ":,.0f", "Year": True})
-                    
-                    fig_history.update_layout(hovermode="x unified")
-                    fig_history.update_yaxes(rangemode="tozero")
-
-                    st.plotly_chart(fig_history, use_container_width=True)
-                else:
-                    st.info("No historical data found for the selected contract month and years to compare that has non-zero Open Interest.")
+                st.warning(f"No data found for contract {selected_contract_symbol} (table '{table_name_to_fetch}') in the database.")
+        else:
+            st.error("Could not parse selected contract symbol.")
 
     st.markdown("---") 
     st.write("Data sourced from Databento via your ingestion script.")
