@@ -5,3 +5,4 @@ pymysql
 mysql-connector-python # Used by mysql+mysqlconnector SQLAlchemy dialect
 python-dateutil # For relativedelta
 plotly
+scipy
