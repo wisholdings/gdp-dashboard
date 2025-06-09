@@ -40,39 +40,6 @@ def get_db_engine():
         st.stop() 
 
 @st.cache_data(ttl=3600)
-def get_generation_data(table_name: str, start_date=None, end_date=None):
-    """Fetch generation data from the specified table"""
-    engine = get_db_engine()
-    df = pd.DataFrame()
-    
-    try:
-        # Base query
-        query = f"SELECT * FROM `{table_name}` ORDER BY timestamp ASC"
-        
-        # Add date filtering if provided
-        if start_date and end_date:
-            query = f"""
-                SELECT * FROM `{table_name}` 
-                WHERE DATE(timestamp) BETWEEN '{start_date}' AND '{end_date}'
-                ORDER BY timestamp ASC
-            """
-        
-        df = pd.read_sql_query(query, engine)
-        
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
-            # Convert numeric columns
-            numeric_columns = [col for col in df.columns if col not in ['timestamp', 'date_published']]
-            for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-                
-        return df
-        
-    except Exception as e:
-        st.error(f"Error fetching data from table '{table_name}': {e}")
-        return pd.DataFrame()
-
 def get_generation_tables():
     """Get all hourly generation tables"""
     engine = get_db_engine()
@@ -85,35 +52,146 @@ def get_generation_tables():
     ]
     return sorted(generation_tables)
 
-def parse_table_name(table_name):
-    """Extract region name from table name"""
-    return table_name.replace('_hourly_generation', '').replace('_', ' ').title()
+@st.cache_data(ttl=3600)
+def get_aggregated_generation_data(start_date=None, end_date=None):
+    """Fetch and aggregate generation data from all regions"""
+    engine = get_db_engine()
+    generation_tables = get_generation_tables()
+    
+    if not generation_tables:
+        return pd.DataFrame()
+    
+    all_data = []
+    
+    for table in generation_tables:
+        try:
+            # Get region name from table
+            region = table.replace('_hourly_generation', '').upper()
+            
+            # Build query with date filtering if provided
+            if start_date and end_date:
+                query = f"""
+                    SELECT timestamp, *
+                    FROM `{table}` 
+                    WHERE DATE(timestamp) BETWEEN '{start_date}' AND '{end_date}'
+                    ORDER BY timestamp ASC
+                """
+            else:
+                query = f"SELECT timestamp, * FROM `{table}` ORDER BY timestamp ASC"
+            
+            df = pd.read_sql_query(query, engine)
+            
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                
+                # Identify load and generation columns
+                load_cols = [col for col in df.columns if 'LOAD' in col.upper()]
+                generation_cols = [col for col in df.columns if '_MW' in col and 'LOAD' not in col.upper()]
+                
+                # Standardize column names by removing region prefix
+                standardized_df = df[['timestamp']].copy()
+                
+                # Add load column (standardized name)
+                if load_cols:
+                    standardized_df['LOAD_MW'] = pd.to_numeric(df[load_cols[0]], errors='coerce')
+                
+                # Add generation columns with standardized names
+                for col in generation_cols:
+                    # Extract generation type (NG, WND, SUN, etc.)
+                    parts = col.split('_')
+                    if len(parts) >= 2:
+                        gen_type = parts[-2]  # Second to last part should be the type
+                        standardized_name = f"{gen_type}_MW"
+                        standardized_df[standardized_name] = pd.to_numeric(df[col], errors='coerce')
+                
+                # Add region identifier
+                standardized_df['region'] = region
+                all_data.append(standardized_df)
+                
+        except Exception as e:
+            st.warning(f"Error processing table {table}: {e}")
+            continue
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    # Combine all regional data
+    combined_df = pd.concat(all_data, ignore_index=True)
+    
+    # Group by timestamp and sum across all regions
+    numeric_cols = [col for col in combined_df.columns if col.endswith('_MW')]
+    
+    aggregated_df = combined_df.groupby('timestamp')[numeric_cols].sum().reset_index()
+    
+    # Remove any columns that are all NaN or zero
+    for col in numeric_cols:
+        if aggregated_df[col].isna().all() or (aggregated_df[col] == 0).all():
+            aggregated_df = aggregated_df.drop(columns=[col])
+    
+    return aggregated_df
+
+def calculate_day_over_day_changes(df):
+    """Calculate day-over-day changes for daily aggregated data"""
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Convert to daily averages first
+    df['date'] = df['timestamp'].dt.date
+    numeric_cols = [col for col in df.columns if col.endswith('_MW')]
+    
+    daily_df = df.groupby('date')[numeric_cols].mean().reset_index()
+    
+    # Calculate day-over-day changes
+    changes_df = daily_df.copy()
+    
+    for col in numeric_cols:
+        # Calculate absolute change
+        changes_df[f"{col}_change"] = daily_df[col].diff()
+        # Calculate percentage change
+        changes_df[f"{col}_pct_change"] = daily_df[col].pct_change() * 100
+    
+    return changes_df
+
+@st.cache_data(ttl=3600)
+def get_data_date_range():
+    """Get the available date range across all generation tables"""
+    engine = get_db_engine()
+    generation_tables = get_generation_tables()
+    
+    if not generation_tables:
+        return None, None
+    
+    min_dates = []
+    max_dates = []
+    
+    for table in generation_tables:
+        try:
+            query = f"SELECT MIN(timestamp) as min_date, MAX(timestamp) as max_date FROM `{table}`"
+            result = pd.read_sql_query(query, engine)
+            if not result.empty and result['min_date'].iloc[0] is not None:
+                min_dates.append(pd.to_datetime(result['min_date'].iloc[0]))
+                max_dates.append(pd.to_datetime(result['max_date'].iloc[0]))
+        except Exception:
+            continue
+    
+    if min_dates and max_dates:
+        return min(min_dates).date(), max(max_dates).date()
+    
+    return None, None
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Texas Generation", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Net Changes", page_icon="📈", layout="wide")
 
 # --- PAGE CONTENT ---
-st.title("⚡ EIA Generation Analysis")
+st.title("📈 Net Changes Analysis")
 st.markdown("---")
 
 st.markdown("""
-**Analyze hourly electricity generation data by source for all regions.**
+**Analyze day-over-day changes in total electricity generation across all regions.**
 
-This page provides detailed analysis of electricity generation patterns including load demand, 
-natural gas, wind, solar, coal, nuclear, hydro, and other sources across multiple regions.
+This page aggregates hourly generation data from all available regions (California, Texas, Florida, etc.) 
+and compares forecast changes day-over-day for each generation source.
 """)
-
-# Establish DB connection
-engine = get_db_engine()
-if not engine: 
-    st.stop()
-
-# Get available generation tables
-generation_tables = get_generation_tables()
-
-if not generation_tables:
-    st.warning("⚠️ No hourly generation tables found in the database.")
-    st.stop()
 
 # Sidebar controls
 with st.sidebar:
@@ -128,33 +206,33 @@ with st.sidebar:
         
     if st.button("🔮 Future Contracts", use_container_width=True):
         st.switch_page("pages/2_Future_Contracts.py")
+        
+    if st.button("⚡ EIA Generation", use_container_width=True):
+        st.switch_page("pages/3_EIA_Generation.py")
     
     st.markdown("---")
-    st.info("📍 **Current Page:** EIA Generation")
+    st.info("📍 **Current Page:** Net Changes")
     
     st.subheader("📊 Analysis Controls")
     
-    # Table selection
-    selected_table = st.selectbox(
-        "Select Region:",
-        options=generation_tables,
-        format_func=parse_table_name,
-        help="Choose a region to analyze"
-    )
+    # Get available date range
+    min_date, max_date = get_data_date_range()
     
-    # Date range selection
-    st.subheader("📅 Date Range")
-    
-    # Get min/max dates for the selected table
-    sample_data = get_generation_data(selected_table)
-    if not sample_data.empty:
-        min_date = sample_data['timestamp'].min().date()
-        max_date = sample_data['timestamp'].max().date()
+    if min_date and max_date:
+        st.write(f"**Available Data:** {min_date} to {max_date}")
         
-        st.write(f"Available: {min_date} to {max_date}")
+        # Analysis type selection
+        analysis_type = st.selectbox(
+            "Analysis Type:",
+            ["Day-over-Day Changes", "Cumulative Trends", "Generation Mix Evolution"],
+            help="Choose the type of analysis to perform"
+        )
         
-        # Default to last 7 days
-        default_start = max(min_date, max_date - timedelta(days=7))
+        # Date range selection
+        st.subheader("📅 Date Range")
+        
+        # Default to last 30 days for performance
+        default_start = max(min_date, max_date - timedelta(days=30))
         
         start_date = st.date_input(
             "Start Date",
@@ -173,207 +251,250 @@ with st.sidebar:
         if start_date > end_date:
             st.error("Start date must be before end date")
             st.stop()
+        
+        # Chart options
+        st.subheader("📈 Chart Options")
+        show_percentage = st.checkbox("Show Percentage Changes", value=True)
+        show_absolute = st.checkbox("Show Absolute Changes", value=False)
+        filter_small_changes = st.checkbox("Filter Small Changes", value=True)
+        if filter_small_changes:
+            min_change_threshold = st.slider("Minimum Change (MW):", 10, 1000, 100)
     else:
-        st.error("No data available for selected table")
+        st.error("Unable to determine data date range")
         st.stop()
-    
-    # Chart options
-    st.subheader("📈 Chart Options")
-    show_load = st.checkbox("Show Load Demand", value=True)
-    show_generation = st.checkbox("Show Generation Sources", value=True)
-    stack_chart = st.checkbox("Stack Generation Sources", value=False)
+
+# Establish DB connection
+engine = get_db_engine()
+if not engine: 
+    st.stop()
 
 # Main content area
-if selected_table:
-    region_name = parse_table_name(selected_table)
-    st.subheader(f"📈 {region_name} Generation Data")
+if min_date and max_date:
     
-    # Load data for selected date range
-    df = get_generation_data(selected_table, start_date, end_date)
+    # Load and process data
+    with st.spinner("Loading and aggregating data from all regions..."):
+        df = get_aggregated_generation_data(start_date, end_date)
     
     if df.empty:
-        st.warning(f"No data found for {region_name} in the selected date range.")
+        st.warning(f"No data found for the selected date range ({start_date} to {end_date}).")
     else:
-        # Display data info
+        # Show available regions and generation types
+        generation_tables = get_generation_tables()
+        regions = [t.replace('_hourly_generation', '').replace('_', ' ').title() for t in generation_tables]
+        generation_types = [col.replace('_MW', '') for col in df.columns if col.endswith('_MW')]
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Data Points", f"{len(df):,}")
+            st.metric("Regions Aggregated", len(regions))
         with col2:
-            st.metric("Date Range", f"{(end_date - start_date).days} days")
+            st.metric("Generation Types", len(generation_types))
         with col3:
-            if 'timestamp' in df.columns:
-                hours_span = (df['timestamp'].max() - df['timestamp'].min()).total_seconds() / 3600
-                st.metric("Hours Span", f"{hours_span:.0f}")
+            st.metric("Data Points", f"{len(df):,}")
         
-        # Identify columns
-        load_col = [col for col in df.columns if 'LOAD' in col.upper()]
-        generation_cols = [col for col in df.columns if '_MW' in col and 'LOAD' not in col.upper()]
+        st.info(f"**Regions:** {', '.join(regions)}")
+        st.info(f"**Generation Types:** {', '.join(generation_types)}")
         
-        # Create plots
-        if show_load and show_generation:
-            # Dual-axis plot
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=['Load Demand', 'Generation by Source'],
-                vertical_spacing=0.1,
-                specs=[[{"secondary_y": False}], [{"secondary_y": False}]]
+        if analysis_type == "Day-over-Day Changes":
+            st.subheader("📊 Day-over-Day Generation Changes")
+            
+            # Calculate day-over-day changes
+            changes_df = calculate_day_over_day_changes(df)
+            
+            if changes_df.empty:
+                st.warning("Unable to calculate day-over-day changes.")
+            else:
+                # Filter out the first row (no previous day to compare)
+                changes_df = changes_df.iloc[1:].copy()
+                
+                # Get change columns
+                change_cols = [col for col in changes_df.columns if col.endswith('_change')]
+                pct_change_cols = [col for col in changes_df.columns if col.endswith('_pct_change')]
+                
+                # Create visualization
+                if show_percentage and pct_change_cols:
+                    fig = go.Figure()
+                    
+                    colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
+                    
+                    for i, col in enumerate(pct_change_cols):
+                        gen_type = col.replace('_MW_pct_change', '')
+                        
+                        # Filter small changes if requested
+                        plot_data = changes_df.copy()
+                        if filter_small_changes:
+                            abs_change_col = f"{gen_type}_MW_change"
+                            if abs_change_col in changes_df.columns:
+                                plot_data = plot_data[abs(plot_data[abs_change_col]) >= min_change_threshold]
+                        
+                        if not plot_data.empty:
+                            fig.add_trace(go.Scatter(
+                                x=plot_data['date'],
+                                y=plot_data[col],
+                                mode='lines+markers',
+                                name=gen_type,
+                                line=dict(color=colors[i % len(colors)], width=2),
+                                hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Change: %{{y:.2f}}%<extra></extra>"
+                            ))
+                    
+                    fig.update_layout(
+                        title="Day-over-Day Percentage Changes in Generation by Source",
+                        xaxis_title="Date",
+                        yaxis_title="Percentage Change (%)",
+                        hovermode='x unified',
+                        height=500
+                    )
+                    
+                    # Add horizontal line at 0
+                    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                if show_absolute and change_cols:
+                    fig2 = go.Figure()
+                    
+                    colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
+                    
+                    for i, col in enumerate(change_cols):
+                        gen_type = col.replace('_MW_change', '')
+                        
+                        # Filter small changes if requested
+                        plot_data = changes_df.copy()
+                        if filter_small_changes:
+                            plot_data = plot_data[abs(plot_data[col]) >= min_change_threshold]
+                        
+                        if not plot_data.empty:
+                            fig2.add_trace(go.Scatter(
+                                x=plot_data['date'],
+                                y=plot_data[col],
+                                mode='lines+markers',
+                                name=gen_type,
+                                line=dict(color=colors[i % len(colors)], width=2),
+                                hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Change: %{{y:,.0f}} MW<extra></extra>"
+                            ))
+                    
+                    fig2.update_layout(
+                        title="Day-over-Day Absolute Changes in Generation by Source",
+                        xaxis_title="Date",
+                        yaxis_title="Change (MW)",
+                        hovermode='x unified',
+                        height=500
+                    )
+                    
+                    # Add horizontal line at 0
+                    fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                    
+                    st.plotly_chart(fig2, use_container_width=True)
+                
+                # Summary statistics
+                st.subheader("📊 Change Statistics Summary")
+                
+                if pct_change_cols:
+                    stats_data = []
+                    
+                    for col in pct_change_cols:
+                        gen_type = col.replace('_MW_pct_change', '')
+                        valid_data = changes_df[col].dropna()
+                        
+                        if not valid_data.empty:
+                            stats_data.append({
+                                'Generation Type': gen_type,
+                                'Avg Daily Change (%)': f"{valid_data.mean():.2f}%",
+                                'Max Increase (%)': f"{valid_data.max():.2f}%",
+                                'Max Decrease (%)': f"{valid_data.min():.2f}%",
+                                'Volatility (Std Dev)': f"{valid_data.std():.2f}%",
+                                'Days with Data': len(valid_data)
+                            })
+                    
+                    if stats_data:
+                        stats_df = pd.DataFrame(stats_data)
+                        st.dataframe(stats_df, use_container_width=True)
+        
+        elif analysis_type == "Cumulative Trends":
+            st.subheader("📈 Cumulative Generation Trends")
+            
+            # Convert to daily averages
+            df['date'] = df['timestamp'].dt.date
+            numeric_cols = [col for col in df.columns if col.endswith('_MW')]
+            daily_df = df.groupby('date')[numeric_cols].mean().reset_index()
+            
+            # Create cumulative trends plot
+            fig = go.Figure()
+            colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
+            
+            for i, col in enumerate(numeric_cols):
+                gen_type = col.replace('_MW', '')
+                
+                fig.add_trace(go.Scatter(
+                    x=daily_df['date'],
+                    y=daily_df[col],
+                    mode='lines',
+                    name=gen_type,
+                    line=dict(color=colors[i % len(colors)], width=2),
+                    hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Generation: %{{y:,.0f}} MW<extra></extra>"
+                ))
+            
+            fig.update_layout(
+                title="Daily Average Generation by Source (All Regions Combined)",
+                xaxis_title="Date",
+                yaxis_title="Generation (MW)",
+                hovermode='x unified',
+                height=500
             )
             
-            # Load plot
-            if load_col:
-                load_data = df[load_col[0]].dropna()
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['timestamp'], 
-                        y=load_data,
-                        mode='lines',
-                        name='Load Demand',
-                        line=dict(color='red', width=2),
-                        hovertemplate="Time: %{x}<br>Load: %{y:,.0f} MW<extra></extra>"
-                    ),
-                    row=1, col=1
-                )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        elif analysis_type == "Generation Mix Evolution":
+            st.subheader("🥧 Generation Mix Evolution")
             
-            # Generation plot
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+            # Convert to daily totals and calculate percentages
+            df['date'] = df['timestamp'].dt.date
+            numeric_cols = [col for col in df.columns if col.endswith('_MW') and col != 'LOAD_MW']
+            daily_df = df.groupby('date')[numeric_cols].mean().reset_index()
             
-            if stack_chart:
-                # Stacked area chart
-                y_stack = None
-                for i, col in enumerate(generation_cols):
-                    col_data = df[col].fillna(0)
-                    if y_stack is None:
-                        y_stack = col_data
-                        stackgroup = 'one'
-                    else:
-                        stackgroup = 'one'
-                    
-                    source_name = col.replace(f"{region_name.upper()}_", "").replace("_MW", "")
-                    
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df['timestamp'],
-                            y=col_data,
-                            mode='lines',
-                            stackgroup=stackgroup,
-                            name=source_name,
-                            line=dict(color=colors[i % len(colors)]),
-                            hovertemplate=f"{source_name}: %{{y:,.0f}} MW<extra></extra>"
-                        ),
-                        row=2, col=1
-                    )
-            else:
-                # Individual lines
-                for i, col in enumerate(generation_cols):
-                    col_data = df[col].dropna()
-                    source_name = col.replace(f"{region_name.upper()}_", "").replace("_MW", "")
-                    
-                    fig.add_trace(
-                        go.Scatter(
-                            x=df['timestamp'], 
-                            y=col_data,
-                            mode='lines',
-                            name=source_name,
-                            line=dict(color=colors[i % len(colors)]),
-                            hovertemplate=f"{source_name}: %{{y:,.0f}} MW<extra></extra>"
-                        ),
-                        row=2, col=1
-                    )
+            # Calculate total generation and percentages
+            daily_df['total_generation'] = daily_df[numeric_cols].sum(axis=1)
             
-        elif show_load:
-            # Load only
+            for col in numeric_cols:
+                daily_df[f"{col}_pct"] = (daily_df[col] / daily_df['total_generation']) * 100
+            
+            # Create stacked area chart
             fig = go.Figure()
-            if load_col:
-                load_data = df[load_col[0]].dropna()
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['timestamp'], 
-                        y=load_data,
-                        mode='lines',
-                        name='Load Demand',
-                        line=dict(color='red', width=2),
-                        hovertemplate="Time: %{x}<br>Load: %{y:,.0f} MW<extra></extra>"
-                    )
-                )
-            fig.update_layout(title=f"{region_name} Load Demand")
+            colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
             
-        elif show_generation:
-            # Generation only
-            fig = go.Figure()
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
-            
-            for i, col in enumerate(generation_cols):
-                col_data = df[col].dropna()
-                source_name = col.replace(f"{region_name.upper()}_", "").replace("_MW", "")
+            for i, col in enumerate(numeric_cols):
+                gen_type = col.replace('_MW', '')
+                pct_col = f"{col}_pct"
                 
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['timestamp'], 
-                        y=col_data,
-                        mode='lines',
-                        name=source_name,
-                        line=dict(color=colors[i % len(colors)]),
-                        hovertemplate=f"{source_name}: %{{y:,.0f}} MW<extra></extra>"
-                    )
-                )
-            fig.update_layout(title=f"{region_name} Generation by Source")
-        
-        # Update layout
-        fig.update_layout(
-            height=600 if show_load and show_generation else 400,
-            hovermode='x unified',
-            showlegend=True,
-            xaxis_title="Time",
-            yaxis_title="Power (MW)"
-        )
-        
-        # Display the plot
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Summary statistics
-        st.subheader("📊 Summary Statistics")
-        
-        # Calculate stats
-        stats_data = []
-        
-        if load_col and not df[load_col[0]].isna().all():
-            load_stats = {
-                'Source': 'Load Demand',
-                'Average (MW)': f"{df[load_col[0]].mean():,.0f}",
-                'Peak (MW)': f"{df[load_col[0]].max():,.0f}",
-                'Minimum (MW)': f"{df[load_col[0]].min():,.0f}",
-                'Total (MWh)': f"{df[load_col[0]].sum():,.0f}"
-            }
-            stats_data.append(load_stats)
-        
-        for col in generation_cols:
-            if not df[col].isna().all():
-                source_name = col.replace(f"{region_name.upper()}_", "").replace("_MW", "")
-                gen_stats = {
-                    'Source': source_name,
-                    'Average (MW)': f"{df[col].mean():,.0f}",
-                    'Peak (MW)': f"{df[col].max():,.0f}",
-                    'Minimum (MW)': f"{df[col].min():,.0f}",
-                    'Total (MWh)': f"{df[col].sum():,.0f}"
-                }
-                stats_data.append(gen_stats)
-        
-        if stats_data:
-            stats_df = pd.DataFrame(stats_data)
-            st.dataframe(stats_df, use_container_width=True)
-        
-        # Raw data sample
-        with st.expander("📋 Raw Data Sample"):
-            st.dataframe(df.head(24), use_container_width=True)  # Show first 24 hours
+                fig.add_trace(go.Scatter(
+                    x=daily_df['date'],
+                    y=daily_df[pct_col],
+                    mode='lines',
+                    stackgroup='one',
+                    name=gen_type,
+                    line=dict(color=colors[i % len(colors)]),
+                    hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Share: %{{y:.1f}}%<extra></extra>"
+                ))
             
-            if st.button("📥 Download Full Dataset"):
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="Download CSV",
-                    data=csv,
-                    file_name=f"{region_name}_generation_{start_date}_{end_date}.csv",
-                    mime="text/csv"
-                )
+            fig.update_layout(
+                title="Generation Mix Evolution (Percentage of Total)",
+                xaxis_title="Date",
+                yaxis_title="Percentage of Total Generation (%)",
+                hovermode='x unified',
+                height=500
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Raw data section
+        with st.expander("📋 Raw Data Sample"):
+            if analysis_type == "Day-over-Day Changes" and not changes_df.empty:
+                st.dataframe(changes_df.head(20), use_container_width=True)
+            else:
+                # Show daily averages
+                df['date'] = df['timestamp'].dt.date
+                numeric_cols = [col for col in df.columns if col.endswith('_MW')]
+                daily_sample = df.groupby('date')[numeric_cols].mean().reset_index().head(20)
+                st.dataframe(daily_sample, use_container_width=True)
 
 st.markdown("---")
-st.markdown("**💾 Data Source:** EIA via automated ingestion script | **🔄 Data Updates:** Every hour")
+st.markdown("**💾 Data Source:** EIA Generation Data (All Regions Aggregated) | **🔄 Data Updates:** Hourly")
