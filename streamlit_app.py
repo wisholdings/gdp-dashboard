@@ -15,8 +15,6 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 import mysql.connector 
 
 # --- HARDCODED DATABASE CREDENTIALS (FOR TESTING ONLY) ---
-# >>> REMOVE THESE FOR PRODUCTION OR USE ENVIRONMENT VARIABLES/SECRET MANAGER <<<
-# >>> THESE CREDENTIALS AND THE IP WHITELISTING (0.0.0.0/0) ARE SECURITY RISKS IF LEFT PUBLIC <<<
 HARDCODED_DB_HOST = "34.66.61.153" 
 HARDCODED_DB_DATABASE = "test"
 HARDCODED_DB_USER = "root"
@@ -34,9 +32,8 @@ FUTURES_MONTH_CODES_REV = {v: k for k, v in FUTURES_MONTH_CODES.items()}
 
 # --- Database Connection and Caching ---
 
-@st.cache_resource # Cache the database engine
+@st.cache_resource 
 def get_db_engine():
-    """Establishes and returns a SQLAlchemy Engine for MySQL using HARDCODED credentials and direct IP."""
     try:
         connection_string = (
             f"mysql+mysqlconnector://{HARDCODED_DB_USER}:"
@@ -46,9 +43,8 @@ def get_db_engine():
         
         engine = create_engine(connection_string, echo=False) 
         
-        # Test connection by executing a simple query
         with engine.connect() as connection:
-            connection.execute(text("SELECT 1")).scalar() # Just a simple test, no need for result
+            connection.execute(text("SELECT 1")).scalar() 
         
         return engine
     except Exception as e:
@@ -57,13 +53,11 @@ def get_db_engine():
                  f"Also check database user/password are correct. Full error: {e}")
         st.stop() 
 
-@st.cache_data(ttl=3600) # Cache the list of generated symbols for 1 hour
+def _get_last_day_of_month(year, month):
+    return calendar.monthrange(year, month)[1]
+
+@st.cache_data(ttl=3600) 
 def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
-    """
-    Generates contract symbols for the next `num_months_out` months,
-    starting from `start_dt`. Uses 2-digit year suffix.
-    Returns a list of (symbol_name, contract_y, contract_m, expiration_datetime_obj).
-    """
     generated_contracts = []
     current_processing_date = start_dt
     
@@ -72,8 +66,7 @@ def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
         year_suffix = f"{contract_y % 100:02d}"
         month_code = FUTURES_MONTH_CODES[contract_m]
         symbol_name = f"{PRODUCT_SYMBOL}{month_code}{year_suffix}"
-        
-        # Simplistic expiration, not strictly needed for this app, but kept for consistency
+
         exp_year_cand = contract_y
         exp_month_cand = contract_m - 1
         if exp_month_cand == 0: 
@@ -92,7 +85,6 @@ def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
 
 @st.cache_data(ttl=3600)
 def get_all_contract_table_names(product_symbol="ng"):
-    """Fetches all relevant futures table names from the database."""
     engine = get_db_engine()
     inspector = inspect(engine)
     all_table_names = inspector.get_table_names()
@@ -106,21 +98,17 @@ def get_all_contract_table_names(product_symbol="ng"):
 
 @st.cache_data(ttl=3600)
 def get_contract_data_from_db(table_name: str):
-    """
-    Fetches all available data for a given contract table, including OI and Settlement Price.
-    Returns DataFrame with 'trade_date' as index, sorted ascending.
-    """
     engine = get_db_engine()
     df = pd.DataFrame()
     try:
-        # Fetch OI and Settlement Price
         query = f"SELECT trade_date, open_interest, settlement_price FROM `{table_name.lower()}` ORDER BY trade_date ASC"
             
         df = pd.read_sql_query(query, engine)
         
         if not df.empty:
             df['trade_date'] = pd.to_datetime(df['trade_date']).dt.date # Convert to date objects
-            df = df.set_index('trade_date') # Set trade_date as index
+            # IMPORTANT: DO NOT SET INDEX HERE YET for Plotly Express compatibility
+            # df = df.set_index('trade_date') # REMOVED THIS LINE
             
             # Ensure columns are numeric, coercing errors to NaN
             df['open_interest'] = pd.to_numeric(df['open_interest'], errors='coerce')
@@ -133,7 +121,6 @@ def get_contract_data_from_db(table_name: str):
 # --- Streamlit App UI ---
 
 # --- 0. SIMPLE AUTHENTICATION STATE ---
-# Authentication is skipped for direct DB connection test
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = True 
 
@@ -155,7 +142,7 @@ else:
 
     # --- Establish DB connection ---
     engine = get_db_engine()
-    if not engine: # If get_db_engine stopped the app, this won't be reached
+    if not engine: 
         st.stop()
 
     # --- Select Contract ---
@@ -163,25 +150,21 @@ else:
     
     available_contract_symbols = [] 
     for table_name in all_futures_table_names:
-        # Assuming table names are like ng032024
         match = re.match(rf"^{PRODUCT_SYMBOL.lower()}(\d{{2}})(\d{{4}})$", table_name)
         if match:
             month_num = int(match.group(1))
             year_full = int(match.group(2))
             month_code = FUTURES_MONTH_CODES.get(month_num)
             if month_code:
-                # Format for display: NG + Month Code + 2-digit Year (e.g., NGU24 for NG Aug 2024)
                 display_symbol = f"{PRODUCT_SYMBOL}{month_code}{year_full%100:02d}"
                 available_contract_symbols.append(display_symbol)
     
-    available_contract_symbols.sort() # Sort chronologically for easy selection
+    available_contract_symbols.sort() 
 
     if not available_contract_symbols:
         st.warning("No Natural Gas futures contracts found in the database. Please ensure your ingestion script has successfully populated data.")
         st.stop()
     
-    # Determine default selection (e.g., the most recent contract or a common one)
-    # Using the last item in the sorted list as a default
     default_selected_symbol = available_contract_symbols[-1] if available_contract_symbols else None
 
     selected_contract_symbol = st.selectbox(
@@ -192,17 +175,15 @@ else:
     )
 
     if selected_contract_symbol:
-        # Parse the selected symbol back to table name format (e.g., NGU24 -> ng082024)
         match = re.match(r"([A-Z]+)([FGHJKMNQUVXZ])(\d{1,2})", selected_contract_symbol)
         if match:
             product, month_code, year_suffix_str = match.groups()
             base_year_2digit = int(year_suffix_str)
             
-            # Convert 2-digit year suffix to full year (robustly)
             current_century = (datetime.utcnow().year // 100) * 100
-            if base_year_2digit <= (datetime.utcnow().year % 100) + 1: # Assuming years 00-current_year_last_2_digits + 1 are current century
+            if base_year_2digit <= (datetime.utcnow().year % 100) + 1: 
                 full_year = current_century + base_year_2digit
-            else: # Assuming years > current_year_last_2_digits + 1 are previous century
+            else: 
                 full_year = (current_century - 100) + base_year_2digit
             
             month_num = FUTURES_MONTH_CODES_REV[month_code]
@@ -213,10 +194,10 @@ else:
             if not df_contract_data.empty:
                 st.subheader(f"Historical Data for {selected_contract_symbol}")
 
-                # Filter out NaN/zero Open Interest and Settlement Price for plotting
+                # Ensure 'trade_date' is available as a column for Plotly Express
+                # df_contract_data already has 'trade_date' as a column, not index, after get_contract_data_from_db update
+                
                 df_plot = df_contract_data.copy()
-                df_plot['open_interest'] = pd.to_numeric(df_plot['open_interest'], errors='coerce')
-                df_plot['settlement_price'] = pd.to_numeric(df_plot['settlement_price'], errors='coerce')
                 
                 df_plot_filtered_oi = df_plot[df_plot['open_interest'].notna() & (df_plot['open_interest'] != 0)].copy()
                 df_plot_filtered_settlement = df_plot[df_plot['settlement_price'].notna()].copy()
@@ -225,11 +206,11 @@ else:
                 # --- Plot 1: Historical Open Interest ---
                 if not df_plot_filtered_oi.empty:
                     fig_oi = px.line(df_plot_filtered_oi, 
-                                     x=df_plot_filtered_oi.index, 
+                                     x="trade_date", # Changed to column name
                                      y="open_interest", 
                                      title=f"Historical Open Interest: {selected_contract_symbol}",
-                                     labels={"x": "Trade Date", "open_interest": "Open Interest"},
-                                     hover_data={"open_interest": ":,.0f", df_plot_filtered_oi.index.name: "|%Y-%m-%d"}) # Include index in hover
+                                     labels={"trade_date": "Trade Date", "open_interest": "Open Interest"},
+                                     hover_data={"open_interest": ":,.0f", "trade_date": "|%Y-%m-%d"}) 
                     fig_oi.update_yaxes(rangemode="tozero")
                     st.plotly_chart(fig_oi, use_container_width=True)
                 else:
@@ -238,18 +219,18 @@ else:
                 # --- Plot 2: Historical Settlement Price ---
                 if not df_plot_filtered_settlement.empty:
                     fig_settlement = px.line(df_plot_filtered_settlement, 
-                                              x=df_plot_filtered_settlement.index, 
+                                              x="trade_date", # Changed to column name
                                               y="settlement_price", 
                                               title=f"Historical Settlement Price: {selected_contract_symbol}",
-                                              labels={"x": "Trade Date", "settlement_price": "Settlement Price"},
-                                              hover_data={"settlement_price": ":,.2f", df_plot_filtered_settlement.index.name: "|%Y-%m-%d"})
+                                              labels={"trade_date": "Trade Date", "settlement_price": "Settlement Price"},
+                                              hover_data={"settlement_price": ":,.2f", "trade_date": "|%Y-%m-%d"})
                     fig_settlement.update_yaxes(rangemode="tozero")
                     st.plotly_chart(fig_settlement, use_container_width=True)
                 else:
                     st.info(f"No valid Settlement Price data found for {selected_contract_symbol}.")
 
                 st.subheader("Raw Data Sample:")
-                st.dataframe(df_contract_data.head()) # Show a sample of the raw data
+                st.dataframe(df_contract_data.head()) 
                 st.markdown(f"Total rows: {len(df_contract_data)}")
 
 
