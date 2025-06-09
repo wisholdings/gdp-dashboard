@@ -3,40 +3,36 @@ import pandas as pd
 import os 
 
 # Import SQLAlchemy components
-from sqlalchemy import create_engine, inspect, text 
-from sqlalchemy.exc import OperationalError, ProgrammingError 
+from sqlalchemy import create_engine, text 
 import mysql.connector 
 
 # --- HARDCODED DATABASE CREDENTIALS (FOR TESTING ONLY) ---
-HARDCODED_DB_HOST = "/cloudsql/crucial-citron-461315-t0:us-central1:streamlit-stosbx" # Your Cloud SQL Instance Connection Name (Unix Socket Path)
+# >>> THESE CREDENTIALS AND THE IP WHITELISTING ARE SECURITY RISKS <<<
+# >>> USE ENVIRONMENT VARIABLES/SECRET MANAGER FOR PRODUCTION <<<
+
+# IMPORTANT: This must be your Cloud SQL Instance's PUBLIC IP Address.
+# You provided this: 34.66.61.153
+HARDCODED_DB_HOST = "34.66.61.153" 
 HARDCODED_DB_DATABASE = "test"
 HARDCODED_DB_USER = "root"
 HARDCODED_DB_PASSWORD = "TrumpMick2024!!" # Your actual DB password
-HARDCODED_DB_PORT = "" 
+HARDCODED_DB_PORT = 3306 # Standard MySQL port
 # -------------------------------------------------------------------------------
 
 
-# --- Database Connection and Caching ---
+# --- Database Connection ---
 
-@st.cache_resource 
+@st.cache_resource # Cache the database engine
 def get_db_engine():
-    """Establishes and returns a SQLAlchemy Engine for MySQL using HARDCODED credentials."""
+    """Establishes and returns a SQLAlchemy Engine for MySQL using HARDCODED credentials and direct IP."""
     try:
-        # Construct connection string for MySQL via Unix socket (preferred for App Engine)
-        # We need to tell SQLAlchemy/mysql.connector to use the Unix socket explicitly.
         connection_string = (
             f"mysql+mysqlconnector://{HARDCODED_DB_USER}:"
-            f"{HARDCODED_DB_PASSWORD}@{HARDCODED_DB_DATABASE}" # Host is provided in connect_args
+            f"{HARDCODED_DB_PASSWORD}@{HARDCODED_DB_HOST}:"
+            f"{HARDCODED_DB_PORT}/{HARDCODED_DB_DATABASE}"
         )
         
-        # THIS IS THE CRITICAL CHANGE: Use connect_args for unix_socket
-        engine = create_engine(
-            connection_string, 
-            echo=False,
-            connect_args={
-                "unix_socket": HARDCODED_DB_HOST # Pass the socket path here
-            }
-        ) 
+        engine = create_engine(connection_string, echo=False) 
         
         # Test connection by executing a simple query
         with engine.connect() as connection:
@@ -47,18 +43,18 @@ def get_db_engine():
     except Exception as e:
         st.error(f"Error connecting to database: {e}")
         st.write("Please check:")
-        st.write(f"- Hardcoded `HARDCODED_DB_HOST` (`{HARDCODED_DB_HOST}`) is correctly set as the Cloud SQL Instance Connection Name (Unix Socket Path).")
+        st.write(f"- Hardcoded `HARDCODED_DB_HOST` (`{HARDCODED_DB_HOST}`) is your Cloud SQL Public IP.")
         st.write(f"- Hardcoded `HARDCODED_DB_USER` (`{HARDCODED_DB_USER}`) and `HARDCODED_DB_PASSWORD` are correct.")
-        st.write("- Cloud SQL API is enabled for your project.")
-        st.write("- App Engine service account (or the one impersonated via WIF) has `Cloud SQL Client` role on your project.")
-        st.write(f"Full error details: {e}") # Provide more details if it's still failing
+        st.write(f"- **CRITICAL:** The **public IP address of the machine running this Streamlit app** is whitelisted in your Cloud SQL instance's Authorized Networks (`0.0.0.0/0` or your specific IP/CIDR).")
+        st.write(f"- Cloud SQL API is enabled for your project.")
+        st.write(f"Full error details: {e}")
         st.stop() 
 
 # --- Streamlit App UI ---
 st.set_page_config(page_title="DB Connection Test")
 
-st.title("Database Connection Test App")
-st.write("Attempting to connect to the Google Cloud SQL (MySQL) database with hardcoded credentials via Unix socket...")
+st.title("Database Connection Test App (Direct IP)")
+st.write("Attempting to connect to the Google Cloud SQL (MySQL) database with hardcoded public IP credentials...")
 
 # Call the function to attempt database connection
 engine = get_db_engine()
@@ -67,7 +63,7 @@ engine = get_db_engine()
 if engine:
     st.write("Connection established. Attempting a simple query...")
     try:
-        test_table_name = "ng032024" 
+        test_table_name = "ng032024" # Replace with an actual table name from your 'test' DB
         df = pd.read_sql_query(f"SELECT COUNT(*) FROM `{test_table_name}`", engine)
         st.success(f"Successfully queried table `{test_table_name}`! Row count: {df.iloc[0,0]}")
     except Exception as e:
