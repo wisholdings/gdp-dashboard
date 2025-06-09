@@ -211,140 +211,150 @@ else:
     if not engine: 
         st.stop()
 
-    # --- Select Historical Contract Only ---
-    historical_contracts = get_historical_contracts_only()
+    # Create tabs
+    tab1, tab2 = st.tabs(["Historical_OI", "Tab 2"])
     
-    if not historical_contracts:
-        st.warning("No expired Natural Gas futures contracts found in the database. Please ensure your ingestion script has successfully populated historical data.")
-        st.stop()
-    
-    # Create display options
-    contract_options = [f"{contract['symbol']} (Exp: {contract['expiry_date']})" for contract in historical_contracts]
-    
-    selected_option = st.selectbox(
-        "Select a Historical Futures Contract:", 
-        options=contract_options,
-        help="Choose an expired Natural Gas futures contract to view alongside other contracts from the same delivery month."
-    )
-
-    if selected_option:
-        # Find the selected contract
-        selected_index = contract_options.index(selected_option)
-        selected_contract = historical_contracts[selected_index]
+    with tab1:
+        st.subheader("Historical Open Interest Analysis")
+        st.write("Compare contracts from the same delivery month across different years using time-to-expiry.")
         
-        st.subheader(f"Historical Overlay for {calendar.month_name[selected_contract['month_num']]} Delivery Contracts")
+        # --- Select Historical Contract Only ---
+        historical_contracts = get_historical_contracts_only()
         
-        # Get all contracts for the same month
-        same_month_contracts = get_contracts_for_same_month(
-            selected_contract['month_num'], 
-            selected_contract['year']
-        )
-        
-        if len(same_month_contracts) < 2:
-            st.warning(f"Only one contract found for {calendar.month_name[selected_contract['month_num']]} delivery. Need multiple years to create overlay.")
+        if not historical_contracts:
+            st.warning("No expired Natural Gas futures contracts found in the database. Please ensure your ingestion script has successfully populated historical data.")
         else:
-            # Create overlay plots
-            fig_oi = go.Figure()
-            fig_settlement = go.Figure()
+            # Create display options
+            contract_options = [f"{contract['symbol']} (Exp: {contract['expiry_date']})" for contract in historical_contracts]
             
-            colors = px.colors.qualitative.Set1
-            
-            for i, contract in enumerate(same_month_contracts):
-                df_contract = get_contract_data_from_db(contract['table_name'])
+            selected_option = st.selectbox(
+                "Select a Historical Futures Contract:", 
+                options=contract_options,
+                help="Choose an expired Natural Gas futures contract to view alongside other contracts from the same delivery month."
+            )
+
+            if selected_option:
+                # Find the selected contract
+                selected_index = contract_options.index(selected_option)
+                selected_contract = historical_contracts[selected_index]
                 
-                if not df_contract.empty:
-                    # Calculate days to expiry
-                    df_contract['days_to_expiry'] = calculate_days_to_expiry(
-                        df_contract['trade_date'], 
-                        contract['expiry_date']
+                st.subheader(f"Historical Overlay for {calendar.month_name[selected_contract['month_num']]} Delivery Contracts")
+                
+                # Get all contracts for the same month
+                same_month_contracts = get_contracts_for_same_month(
+                    selected_contract['month_num'], 
+                    selected_contract['year']
+                )
+                
+                if len(same_month_contracts) < 2:
+                    st.warning(f"Only one contract found for {calendar.month_name[selected_contract['month_num']]} delivery. Need multiple years to create overlay.")
+                else:
+                    # Create overlay plots
+                    fig_oi = go.Figure()
+                    fig_settlement = go.Figure()
+                    
+                    colors = px.colors.qualitative.Set1
+                    
+                    for i, contract in enumerate(same_month_contracts):
+                        df_contract = get_contract_data_from_db(contract['table_name'])
+                        
+                        if not df_contract.empty:
+                            # Calculate days to expiry
+                            df_contract['days_to_expiry'] = calculate_days_to_expiry(
+                                df_contract['trade_date'], 
+                                contract['expiry_date']
+                            )
+                            
+                            # Filter valid data
+                            df_oi = df_contract[
+                                df_contract['open_interest'].notna() & 
+                                (df_contract['open_interest'] != 0) &
+                                (df_contract['days_to_expiry'] >= 0)  # Only include data before expiry
+                            ].copy()
+                            
+                            df_settlement = df_contract[
+                                df_contract['settlement_price'].notna() &
+                                (df_contract['days_to_expiry'] >= 0)  # Only include data before expiry
+                            ].copy()
+                            
+                            color = colors[i % len(colors)]
+                            contract_label = f"{contract['symbol']} ({contract['year']})"
+                            
+                            # Add Open Interest trace
+                            if not df_oi.empty:
+                                fig_oi.add_trace(go.Scatter(
+                                    x=df_oi['days_to_expiry'],
+                                    y=df_oi['open_interest'],
+                                    mode='lines',
+                                    name=contract_label,
+                                    line=dict(color=color),
+                                    hovertemplate=f"{contract_label}<br>" +
+                                                "Days to Expiry: %{x}<br>" +
+                                                "Open Interest: %{y:,.0f}<br>" +
+                                                "<extra></extra>"
+                                ))
+                            
+                            # Add Settlement Price trace
+                            if not df_settlement.empty:
+                                fig_settlement.add_trace(go.Scatter(
+                                    x=df_settlement['days_to_expiry'],
+                                    y=df_settlement['settlement_price'],
+                                    mode='lines',
+                                    name=contract_label,
+                                    line=dict(color=color),
+                                    hovertemplate=f"{contract_label}<br>" +
+                                                "Days to Expiry: %{x}<br>" +
+                                                "Settlement Price: $%{y:.2f}<br>" +
+                                                "<extra></extra>"
+                                ))
+                    
+                    # Update layout for Open Interest
+                    fig_oi.update_layout(
+                        title=f"Open Interest Overlay - {calendar.month_name[selected_contract['month_num']]} Delivery Contracts",
+                        xaxis_title="Days to Expiry",
+                        yaxis_title="Open Interest",
+                        hovermode='closest',
+                        xaxis=dict(autorange='reversed')  # Reverse so expiry (0) is on the right
                     )
                     
-                    # Filter valid data
-                    df_oi = df_contract[
-                        df_contract['open_interest'].notna() & 
-                        (df_contract['open_interest'] != 0) &
-                        (df_contract['days_to_expiry'] >= 0)  # Only include data before expiry
-                    ].copy()
+                    # Update layout for Settlement Price
+                    fig_settlement.update_layout(
+                        title=f"Settlement Price Overlay - {calendar.month_name[selected_contract['month_num']]} Delivery Contracts",
+                        xaxis_title="Days to Expiry",
+                        yaxis_title="Settlement Price ($)",
+                        hovermode='closest',
+                        xaxis=dict(autorange='reversed')  # Reverse so expiry (0) is on the right
+                    )
                     
-                    df_settlement = df_contract[
-                        df_contract['settlement_price'].notna() &
-                        (df_contract['days_to_expiry'] >= 0)  # Only include data before expiry
-                    ].copy()
+                    # Display plots
+                    st.plotly_chart(fig_oi, use_container_width=True)
+                    st.plotly_chart(fig_settlement, use_container_width=True)
                     
-                    color = colors[i % len(colors)]
-                    contract_label = f"{contract['symbol']} ({contract['year']})"
+                    # Show summary
+                    st.subheader("Contract Summary")
+                    summary_data = []
+                    for contract in same_month_contracts:
+                        df_contract = get_contract_data_from_db(contract['table_name'])
+                        if not df_contract.empty:
+                            max_oi = df_contract['open_interest'].max() if df_contract['open_interest'].notna().any() else 0
+                            avg_price = df_contract['settlement_price'].mean() if df_contract['settlement_price'].notna().any() else 0
+                            data_points = len(df_contract)
+                            
+                            summary_data.append({
+                                'Contract': contract['symbol'],
+                                'Year': contract['year'],
+                                'Expiry Date': contract['expiry_date'],
+                                'Data Points': data_points,
+                                'Max Open Interest': f"{max_oi:,.0f}" if max_oi > 0 else "N/A",
+                                'Avg Settlement Price': f"${avg_price:.2f}" if avg_price > 0 else "N/A"
+                            })
                     
-                    # Add Open Interest trace
-                    if not df_oi.empty:
-                        fig_oi.add_trace(go.Scatter(
-                            x=df_oi['days_to_expiry'],
-                            y=df_oi['open_interest'],
-                            mode='lines',
-                            name=contract_label,
-                            line=dict(color=color),
-                            hovertemplate=f"{contract_label}<br>" +
-                                        "Days to Expiry: %{x}<br>" +
-                                        "Open Interest: %{y:,.0f}<br>" +
-                                        "<extra></extra>"
-                        ))
-                    
-                    # Add Settlement Price trace
-                    if not df_settlement.empty:
-                        fig_settlement.add_trace(go.Scatter(
-                            x=df_settlement['days_to_expiry'],
-                            y=df_settlement['settlement_price'],
-                            mode='lines',
-                            name=contract_label,
-                            line=dict(color=color),
-                            hovertemplate=f"{contract_label}<br>" +
-                                        "Days to Expiry: %{x}<br>" +
-                                        "Settlement Price: $%{y:.2f}<br>" +
-                                        "<extra></extra>"
-                        ))
-            
-            # Update layout for Open Interest
-            fig_oi.update_layout(
-                title=f"Open Interest Overlay - {calendar.month_name[selected_contract['month_num']]} Delivery Contracts",
-                xaxis_title="Days to Expiry",
-                yaxis_title="Open Interest",
-                hovermode='closest',
-                xaxis=dict(autorange='reversed')  # Reverse so expiry (0) is on the right
-            )
-            
-            # Update layout for Settlement Price
-            fig_settlement.update_layout(
-                title=f"Settlement Price Overlay - {calendar.month_name[selected_contract['month_num']]} Delivery Contracts",
-                xaxis_title="Days to Expiry",
-                yaxis_title="Settlement Price ($)",
-                hovermode='closest',
-                xaxis=dict(autorange='reversed')  # Reverse so expiry (0) is on the right
-            )
-            
-            # Display plots
-            st.plotly_chart(fig_oi, use_container_width=True)
-            st.plotly_chart(fig_settlement, use_container_width=True)
-            
-            # Show summary
-            st.subheader("Contract Summary")
-            summary_data = []
-            for contract in same_month_contracts:
-                df_contract = get_contract_data_from_db(contract['table_name'])
-                if not df_contract.empty:
-                    max_oi = df_contract['open_interest'].max() if df_contract['open_interest'].notna().any() else 0
-                    avg_price = df_contract['settlement_price'].mean() if df_contract['settlement_price'].notna().any() else 0
-                    data_points = len(df_contract)
-                    
-                    summary_data.append({
-                        'Contract': contract['symbol'],
-                        'Year': contract['year'],
-                        'Expiry Date': contract['expiry_date'],
-                        'Data Points': data_points,
-                        'Max Open Interest': f"{max_oi:,.0f}" if max_oi > 0 else "N/A",
-                        'Avg Settlement Price': f"${avg_price:.2f}" if avg_price > 0 else "N/A"
-                    })
-            
-            summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, use_container_width=True)
+                    summary_df = pd.DataFrame(summary_data)
+                    st.dataframe(summary_df, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Tab 2 Content")
+        st.write("This is where you can add additional functionality for the second tab.")
 
     st.markdown("---") 
     st.write("Data sourced from Databento via your ingestion script.")
