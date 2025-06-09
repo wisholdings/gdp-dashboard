@@ -306,8 +306,8 @@ with st.sidebar:
     if st.button("⚡ EIA Generation", use_container_width=True):
         st.switch_page("pages/3_EIA_Generation.py")
         
-    if st.button("🔥 Power Burns", use_container_width=True):
-        st.switch_page("pages/4_Power_Burns.py")
+    if st.button("📈 Net Changes", use_container_width=True):
+        st.switch_page("pages/5_Net_Changes.py")
     
     st.markdown("---")
     
@@ -363,9 +363,9 @@ with col3:
     st.write("Explore hourly electricity generation by source and region")
 
 with col4:
-    if st.button("🔥 Go to Power Burns Analysis", use_container_width=True):
-        st.switch_page("pages/4_Power_Burns.py")
-    st.write("Analyze daily natural gas consumption for power generation")
+    if st.button("📈 Go to Net Changes Analysis", use_container_width=True):
+        st.switch_page("pages/5_Net_Changes.py")
+    st.write("Analyze day-over-day changes across all regions")
 
 st.markdown("---")
 col1, col2 = st.columns([2, 1])
@@ -383,7 +383,7 @@ with col1:
     - **🔮 Future Contracts** - Active contract comparisons and arbitrage analysis
     
     **⚡ Electricity Generation Analysis:**
-    - **⚡ EIA Generation** - Hourly electricity generation by source and region
+    - **⚡ Texas Generation** - Hourly electricity generation by source and region
     - **📈 Load Demand Analysis** - Power consumption patterns and trends
     
     ### 🚀 Getting Started:
