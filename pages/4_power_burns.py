@@ -477,6 +477,6 @@ try:
             
 except Exception as e:
     st.write("Unable to load quick stats")
-
+#
 st.markdown("---")
 st.markdown("**💾 Data Sources:** Databento (NG Futures) | EIA (Generation) | **🔄 Updates:** Every hour")
