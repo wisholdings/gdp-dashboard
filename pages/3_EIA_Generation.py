@@ -90,7 +90,7 @@ def parse_table_name(table_name):
     return table_name.replace('_hourly_generation', '').replace('_', ' ').title()
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Texas Generation", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="EIA Generation", page_icon="⚡", layout="wide")
 
 # --- PAGE CONTENT ---
 st.title("⚡ EIA Generation Analysis")

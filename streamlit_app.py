@@ -383,7 +383,7 @@ with col1:
     - **🔮 Future Contracts** - Active contract comparisons and arbitrage analysis
     
     **⚡ Electricity Generation Analysis:**
-    - **⚡ Texas Generation** - Hourly electricity generation by source and region
+    - **⚡ EIA Generation** - Hourly electricity generation by source and region
     - **📈 Load Demand Analysis** - Power consumption patterns and trends
     
     ### 🚀 Getting Started:
