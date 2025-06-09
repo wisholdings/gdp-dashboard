@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, date
 import re
 from dateutil.relativedelta import relativedelta
 import calendar
-import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import os 
@@ -53,9 +52,6 @@ def get_db_engine():
                  f"Also check database user/password are correct. Full error: {e}")
         st.stop() 
 
-def _get_last_day_of_month(year, month):
-    return calendar.monthrange(year, month)[1]
-
 def get_contract_expiry_date(year, month):
     """Calculate the expiry date for a natural gas contract (last day of month before delivery month)"""
     exp_year = year
@@ -69,33 +65,6 @@ def get_contract_expiry_date(year, month):
         return datetime(exp_year, exp_month, expiration_day).date()
     except ValueError:
         return datetime(year, month, 1).date()
-
-@st.cache_data(ttl=3600)
-def generate_forward_contract_symbols(start_dt: datetime, num_months_out: int):
-    generated_contracts = []
-    current_processing_date = start_dt
-    
-    for _ in range(num_months_out):
-        contract_y, contract_m = current_processing_date.year, current_processing_date.month
-        year_suffix = f"{contract_y % 100:02d}"
-        month_code = FUTURES_MONTH_CODES[contract_m]
-        symbol_name = f"{PRODUCT_SYMBOL}{month_code}{year_suffix}"
-
-        exp_year_cand = contract_y
-        exp_month_cand = contract_m - 1
-        if exp_month_cand == 0: 
-            exp_month_cand = 12
-            exp_year_cand -= 1
-        try:
-            expiration_day = calendar.monthrange(exp_year_cand, exp_month_cand)[1]
-            expiration_datetime_obj = datetime(exp_year_cand, exp_month_cand, expiration_day)
-        except ValueError:
-            expiration_datetime_obj = datetime(contract_y, contract_m, 1) 
-        
-        generated_contracts.append((symbol_name, contract_y, contract_m, expiration_datetime_obj))
-        current_processing_date += relativedelta(months=1)
-        
-    return generated_contracts
 
 @st.cache_data(ttl=3600)
 def get_all_contract_table_names(product_symbol="ng"):
@@ -127,85 +96,6 @@ def get_contract_data_from_db(table_name: str):
     except Exception as e:
         st.error(f"Error fetching data for table '{table_name}': {e}")
     return df
-
-def parse_contract_symbol(symbol):
-    """Parse a contract symbol and return product, month_code, year, and full year"""
-    match = re.match(r"([A-Z]+)([FGHJKMNQUVXZ])(\d{1,2})", symbol)
-    if not match:
-        return None, None, None, None
-    
-    product, month_code, year_suffix_str = match.groups()
-    base_year_2digit = int(year_suffix_str)
-    
-    # Convert 2-digit year to 4-digit year
-    current_century = (datetime.utcnow().year // 100) * 100
-    if base_year_2digit <= (datetime.utcnow().year % 100) + 1: 
-        full_year = current_century + base_year_2digit
-    else: 
-        full_year = (current_century - 100) + base_year_2digit
-    
-    month_num = FUTURES_MONTH_CODES_REV[month_code]
-    
-    return product, month_code, month_num, full_year
-
-def get_historical_contracts_only():
-    """Get only contracts that have already expired"""
-    all_futures_table_names = get_all_contract_table_names(PRODUCT_SYMBOL)
-    historical_contracts = []
-    current_date = datetime.now().date()
-    
-    for table_name in all_futures_table_names:
-        match = re.match(rf"^{PRODUCT_SYMBOL.lower()}(\d{{2}})(\d{{4}})$", table_name)
-        if match:
-            month_num = int(match.group(1))
-            year_full = int(match.group(2))
-            month_code = FUTURES_MONTH_CODES.get(month_num)
-            
-            if month_code:
-                # Calculate expiry date
-                expiry_date = get_contract_expiry_date(year_full, month_num)
-                
-                # Only include if contract has already expired
-                if expiry_date < current_date:
-                    display_symbol = f"{PRODUCT_SYMBOL}{month_code}{year_full%100:02d}"
-                    historical_contracts.append({
-                        'symbol': display_symbol,
-                        'month_num': month_num,
-                        'year': year_full,
-                        'expiry_date': expiry_date,
-                        'table_name': table_name
-                    })
-    
-    return sorted(historical_contracts, key=lambda x: x['expiry_date'], reverse=True)
-
-def get_contracts_for_same_month(target_month_num, target_year):
-    """Get all historical contracts for the same delivery month"""
-    all_futures_table_names = get_all_contract_table_names(PRODUCT_SYMBOL)
-    same_month_contracts = []
-    current_date = datetime.now().date()
-    
-    for table_name in all_futures_table_names:
-        match = re.match(rf"^{PRODUCT_SYMBOL.lower()}(\d{{2}})(\d{{4}})$", table_name)
-        if match:
-            month_num = int(match.group(1))
-            year_full = int(match.group(2))
-            month_code = FUTURES_MONTH_CODES.get(month_num)
-            
-            if month_code and month_num == target_month_num:
-                expiry_date = get_contract_expiry_date(year_full, month_num)
-                
-                # Only include if contract has already expired
-                if expiry_date < current_date:
-                    display_symbol = f"{PRODUCT_SYMBOL}{month_code}{year_full%100:02d}"
-                    same_month_contracts.append({
-                        'symbol': display_symbol,
-                        'month_num': month_num,
-                        'year': year_full,
-                        'expiry_date': expiry_date,
-                        'table_name': table_name
-                    })
-    
-    return sorted(same_month_contracts, key=lambda x: x['year'])
 
 def get_future_contracts_only():
     """Get only contracts that have not yet expired"""
@@ -270,95 +160,224 @@ def calculate_days_to_expiry(trade_dates, expiry_date):
     """Calculate days to expiry for each trade date"""
     return [(expiry_date - trade_date).days for trade_date in trade_dates]
 
-# --- MAIN APP HOMEPAGE ---
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="Future Contracts", page_icon="🔮", layout="wide")
 
-# --- 0. SIMPLE AUTHENTICATION STATE ---
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = True 
+# --- PAGE CONTENT ---
+st.title("🔮 Future Contracts Analysis")
+st.markdown("---")
 
-if not st.session_state['authenticated']:
-    st.title("Login Required (Auth Disabled for Direct Test)")
-    st.write("Authentication is temporarily disabled in this version for direct DB connection testing.")
+st.markdown("""
+**Compare active contracts from the same delivery month across different years using time-to-expiry analysis.**
+
+This page allows you to overlay future contracts to identify trading opportunities, compare current market behavior 
+against historical patterns, and analyze cross-year arbitrage potential.
+""")
+
+# Sidebar reference
+with st.sidebar:
+    st.subheader("📅 Futures Month Codes:")
+    for month_num, code in FUTURES_MONTH_CODES.items():
+        st.write(f"**{code}**: {calendar.month_name[month_num]}")
+    
+    st.markdown("---")
+    st.subheader("🎯 Analysis Tips:")
+    st.markdown("""
+    - Compare contracts at similar lifecycle stages
+    - Look for unusual OI patterns vs historical norms
+    - Identify price divergences between years
+    - Monitor liquidity differences across contracts
+    """)
+
+# Establish DB connection
+engine = get_db_engine()
+if not engine: 
     st.stop()
 
-# Main page configuration
-st.set_page_config(
-    page_title="NG Futures Analysis",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Select Future Contract Only
+future_contracts = get_future_contracts_only()
 
-st.title("🔥 Natural Gas Futures Analysis Platform")
-st.markdown("---")
+if not future_contracts:
+    st.warning("⚠️ No future Natural Gas futures contracts found in the database. Please ensure your ingestion script has populated data for upcoming contracts.")
+else:
+    # Create display options
+    future_contract_options = [f"{contract['symbol']} (Exp: {contract['expiry_date']})" for contract in future_contracts]
+    
+    selected_future_option = st.selectbox(
+        "🎯 Select a Future Futures Contract:", 
+        options=future_contract_options,
+        help="Choose a future Natural Gas futures contract to view alongside other contracts from the same delivery month."
+    )
 
-# Welcome section
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.markdown("""
-    ## Welcome to the NG Futures Analysis Platform
-    
-    This application provides comprehensive analysis tools for Natural Gas futures contracts:
-    
-    ### 📊 Available Analysis Tools:
-    
-    **🕰️ Historical Open Interest** - Analyze expired contracts using time-to-expiry overlays to identify patterns across years for the same delivery month.
-    
-    **🔮 Future Contracts** - Compare active contracts from the same delivery month across different years to spot opportunities and trends.
-    
-    ### 🚀 Getting Started:
-    Use the sidebar navigation to access different analysis pages. Each page provides specialized tools for understanding Natural Gas futures market dynamics.
-    """)
-
-with col2:
-    st.info("""
-    **📋 Quick Tips:**
-    
-    • Data refreshes hourly from the database
-    • Time-to-expiry analysis reveals seasonal patterns
-    • Compare contracts across multiple years
-    • Export data for further analysis
-    """)
-
-# Database connection check
-st.markdown("---")
-st.subheader("🔗 System Status")
-
-try:
-    engine = get_db_engine()
-    if engine:
-        # Get some basic stats
-        all_tables = get_all_contract_table_names(PRODUCT_SYMBOL)
-        historical_count = len(get_historical_contracts_only())
-        future_count = len(get_future_contracts_only())
+    if selected_future_option:
+        # Find the selected contract
+        selected_future_index = future_contract_options.index(selected_future_option)
+        selected_future_contract = future_contracts[selected_future_index]
         
-        col1, col2, col3, col4 = st.columns(4)
+        st.subheader(f"📈 Future Overlay for {calendar.month_name[selected_future_contract['month_num']]} Delivery Contracts")
         
-        with col1:
-            st.metric("Database Status", "✅ Connected")
-        with col2:
-            st.metric("Total Contracts", len(all_tables))
-        with col3:
-            st.metric("Historical Contracts", historical_count)
-        with col4:
-            st.metric("Future Contracts", future_count)
+        # Get all future contracts for the same month
+        same_month_future_contracts = get_future_contracts_for_same_month(
+            selected_future_contract['month_num'], 
+            selected_future_contract['year']
+        )
+        
+        if len(same_month_future_contracts) < 2:
+            st.warning(f"⚠️ Only one future contract found for {calendar.month_name[selected_future_contract['month_num']]} delivery. Need multiple years to create overlay.")
+        else:
+            # Show contract count and time info
+            nearest_expiry = min(contract['expiry_date'] for contract in same_month_future_contracts)
+            days_to_nearest = (nearest_expiry - datetime.now().date()).days
             
-except Exception as e:
-    st.error(f"❌ Database connection failed: {e}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"📊 Displaying {len(same_month_future_contracts)} active contracts for {calendar.month_name[selected_future_contract['month_num']]} delivery")
+            with col2:
+                st.info(f"⏰ Nearest expiry in {days_to_nearest} days ({nearest_expiry})")
+            
+            # Create overlay plots
+            fig_future_oi = go.Figure()
+            fig_future_settlement = go.Figure()
+            
+            # Define colors manually to avoid plotly express import
+            colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#1f77b4']
+            
+            for i, contract in enumerate(same_month_future_contracts):
+                df_contract = get_contract_data_from_db(contract['table_name'])
+                
+                if not df_contract.empty:
+                    # Calculate days to expiry
+                    df_contract['days_to_expiry'] = calculate_days_to_expiry(
+                        df_contract['trade_date'], 
+                        contract['expiry_date']
+                    )
+                    
+                    # Filter valid data (only include data before expiry)
+                    df_oi = df_contract[
+                        df_contract['open_interest'].notna() & 
+                        (df_contract['open_interest'] != 0) &
+                        (df_contract['days_to_expiry'] >= 0)
+                    ].copy()
+                    
+                    df_settlement = df_contract[
+                        df_contract['settlement_price'].notna() &
+                        (df_contract['days_to_expiry'] >= 0)
+                    ].copy()
+                    
+                    color = colors[i % len(colors)]
+                    contract_label = f"{contract['symbol']} ({contract['year']})"
+                    
+                    # Add emphasis for current year contracts
+                    line_width = 3 if contract['year'] == datetime.now().year else 2
+                    line_dash = 'solid' if contract['year'] == datetime.now().year else 'dash'
+                    
+                    # Add Open Interest trace
+                    if not df_oi.empty:
+                        fig_future_oi.add_trace(go.Scatter(
+                            x=df_oi['days_to_expiry'],
+                            y=df_oi['open_interest'],
+                            mode='lines',
+                            name=contract_label,
+                            line=dict(color=color, width=line_width, dash=line_dash),
+                            hovertemplate=f"{contract_label}<br>" +
+                                        "Days to Expiry: %{x}<br>" +
+                                        "Open Interest: %{y:,.0f}<br>" +
+                                        "<extra></extra>"
+                        ))
+                    
+                    # Add Settlement Price trace
+                    if not df_settlement.empty:
+                        fig_future_settlement.add_trace(go.Scatter(
+                            x=df_settlement['days_to_expiry'],
+                            y=df_settlement['settlement_price'],
+                            mode='lines',
+                            name=contract_label,
+                            line=dict(color=color, width=line_width, dash=line_dash),
+                            hovertemplate=f"{contract_label}<br>" +
+                                        "Days to Expiry: %{x}<br>" +
+                                        "Settlement Price: $%{y:.2f}<br>" +
+                                        "<extra></extra>"
+                        ))
+            
+            # Update layout for Open Interest
+            fig_future_oi.update_layout(
+                title=f"Open Interest Overlay - Future {calendar.month_name[selected_future_contract['month_num']]} Delivery Contracts",
+                xaxis_title="Days to Expiry",
+                yaxis_title="Open Interest",
+                hovermode='closest',
+                xaxis=dict(autorange='reversed'),  # Reverse so expiry (0) is on the right
+                height=500,
+                showlegend=True
+            )
+            
+            # Update layout for Settlement Price
+            fig_future_settlement.update_layout(
+                title=f"Settlement Price Overlay - Future {calendar.month_name[selected_future_contract['month_num']]} Delivery Contracts",
+                xaxis_title="Days to Expiry",
+                yaxis_title="Settlement Price ($)",
+                hovermode='closest',
+                xaxis=dict(autorange='reversed'),  # Reverse so expiry (0) is on the right
+                height=500,
+                showlegend=True
+            )
+            
+            # Display plots
+            st.plotly_chart(fig_future_oi, use_container_width=True)
+            st.plotly_chart(fig_future_settlement, use_container_width=True)
+            
+            # Show summary
+            st.subheader("📋 Future Contract Summary")
+            future_summary_data = []
+            for contract in same_month_future_contracts:
+                df_contract = get_contract_data_from_db(contract['table_name'])
+                if not df_contract.empty:
+                    # Get most recent non-null values instead of just the last row
+                    valid_oi = df_contract['open_interest'].dropna()
+                    valid_price = df_contract['settlement_price'].dropna()
+                    
+                    current_oi = valid_oi.iloc[-1] if not valid_oi.empty else 0
+                    current_price = valid_price.iloc[-1] if not valid_price.empty else 0
+                    data_points = len(df_contract)
+                    days_remaining = (contract['expiry_date'] - datetime.now().date()).days
+                    
+                    future_summary_data.append({
+                        'Contract': contract['symbol'],
+                        'Year': contract['year'],
+                        'Expiry Date': contract['expiry_date'],
+                        'Days Remaining': days_remaining,
+                        'Data Points': data_points,
+                        'Current Open Interest': f"{current_oi:,.0f}" if current_oi > 0 else "N/A",
+                        'Current Settlement Price': f"${current_price:.2f}" if current_price > 0 else "N/A"
+                    })
+            
+            future_summary_df = pd.DataFrame(future_summary_data)
+            st.dataframe(future_summary_df, use_container_width=True)
+            
+            # Trading insights
+            st.subheader("💡 Trading Insights")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                **🔄 Cross-Year Arbitrage:**
+                - Compare prices between years at similar days-to-expiry
+                - Look for unusual spreads that may present opportunities
+                - Monitor convergence patterns as expiry approaches
+                """)
+            
+            with col2:
+                st.markdown("""
+                **📊 Liquidity Analysis:**
+                - Higher OI typically indicates better liquidity
+                - Compare current OI levels to historical norms
+                - Identify contracts with building vs declining interest
+                """)
+            
+            # Current market status
+            current_year_contracts = [c for c in same_month_future_contracts if c['year'] == datetime.now().year]
+            if current_year_contracts:
+                st.info(f"💡 **Current Year Focus**: {datetime.now().year} contracts are highlighted with solid lines in the charts above.")
 
-# Futures month codes reference
 st.markdown("---")
-st.subheader("📅 Futures Month Codes Reference")
-
-cols = st.columns(6)
-months_per_col = 2
-
-for i, (month_num, code) in enumerate(FUTURES_MONTH_CODES.items()):
-    col_idx = i // months_per_col
-    with cols[col_idx]:
-        st.write(f"**{code}** - {calendar.month_name[month_num]}")
-
-st.markdown("---")
-st.markdown("**💾 Data Source:** Databento via automated ingestion script")
-st.markdown("**⚡ Last Updated:** Data refreshes automatically every hour")
+st.markdown("**💾 Data Source:** Databento via automated ingestion script | **🔄 Data Updates:** Every hour")

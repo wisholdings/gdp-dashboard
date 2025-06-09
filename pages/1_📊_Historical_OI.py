@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, date
 import re
 from dateutil.relativedelta import relativedelta
 import calendar
-import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import os 
@@ -224,7 +223,8 @@ else:
             fig_oi = go.Figure()
             fig_settlement = go.Figure()
             
-            colors = px.colors.qualitative.Set1
+            # Define colors manually to avoid plotly express import
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
             
             for i, contract in enumerate(same_month_contracts):
                 df_contract = get_contract_data_from_db(contract['table_name'])
