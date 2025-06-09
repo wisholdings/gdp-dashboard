@@ -90,17 +90,17 @@ def parse_table_name(table_name):
     return table_name.replace('_hourly_generation', '').replace('_', ' ').title()
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="EIA Generation", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Texas Generation", page_icon="⚡", layout="wide")
 
 # --- PAGE CONTENT ---
-st.title("⚡ EIA Hourly Generation Analysis")
+st.title("⚡ EIA Generation Analysis")
 st.markdown("---")
 
 st.markdown("""
-**Analyze hourly electricity generation data by source for EIA.**
+**Analyze hourly electricity generation data by source for all regions.**
 
 This page provides detailed analysis of electricity generation patterns including load demand, 
-natural gas, wind, solar, coal, nuclear, hydro, and other sources.
+natural gas, wind, solar, coal, nuclear, hydro, and other sources across multiple regions.
 """)
 
 # Establish DB connection

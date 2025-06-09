@@ -187,6 +187,9 @@ with st.sidebar:
         
     if st.button("⚡ EIA Generation", use_container_width=True):
         st.switch_page("pages/3_EIA_Generation.py")
+        
+    if st.button("🔥 Power Burns", use_container_width=True):
+        st.switch_page("pages/4_Power_Burns.py")
     
     st.markdown("---")
     st.info("📍 **Current Page:** Future Contracts")
