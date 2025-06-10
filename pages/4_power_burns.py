@@ -110,6 +110,71 @@ def calculate_seasonal_stats(df):
     monthly_stats['Month_Name'] = [calendar.month_name[i] for i in monthly_stats.index]
     
     return monthly_stats.reset_index()
+# SIDEBAR NAVIGATION - COMPLETE FIX (around line 140)
+with st.sidebar:
+    st.title("🧭 Navigation")
+    
+    # Navigation buttons - ALL 6 PAGES
+    if st.button("🏠 Home", use_container_width=True):
+        st.switch_page("streamlit_app.py")
+    
+    if st.button("📊 Historical OI", use_container_width=True):
+        st.switch_page("pages/1_Historical_OI.py")
+        
+    if st.button("🔮 Future Contracts", use_container_width=True):
+        st.switch_page("pages/2_Future_Contracts.py")
+        
+    if st.button("⚡ EIA Generation", use_container_width=True):
+        st.switch_page("pages/3_EIA_Generation.py")
+        
+    if st.button("📈 Net Changes", use_container_width=True):
+        st.switch_page("pages/5_Net_Changes.py")
+        
+    if st.button("📊 Tape Analysis", use_container_width=True):
+        st.switch_page("pages/6_Tape_Analysis.py")
+    
+    st.markdown("---")
+    st.info("📍 **Current Page:** Power Burns")
+    
+    st.subheader("📊 Analysis Controls")
+    
+    # Get available date range
+    min_date, max_date = get_data_date_range()
+    
+    if min_date and max_date:
+        st.write(f"**Available Data:** {min_date} to {max_date}")
+        
+        # Analysis type selection - ADD DAY-OVER-DAY OPTION
+        analysis_type = st.selectbox(
+            "Analysis Type:",
+            ["Time Series View", "Day-over-Day Changes", "Seasonal Analysis", "Yearly Comparison", "Historical vs Forecast"],
+            help="Choose the type of analysis to perform"
+        )
+
+# NEW FUNCTION: Calculate day-over-day changes
+def calculate_day_over_day_changes(df):
+    """Calculate day-over-day changes for power burns data"""
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Sort by report_date to ensure proper order
+    df_sorted = df.sort_values('report_date').copy()
+    
+    # Calculate day-over-day changes
+    df_sorted['previous_day_burns'] = df_sorted['L48_Power_Burns'].shift(1)
+    df_sorted['day_change_absolute'] = df_sorted['L48_Power_Burns'] - df_sorted['previous_day_burns']
+    df_sorted['day_change_percentage'] = (df_sorted['day_change_absolute'] / df_sorted['previous_day_burns']) * 100
+    
+    # Remove the first row (no previous day to compare)
+    df_changes = df_sorted.iloc[1:].copy()
+    
+    # Add rolling statistics
+    df_changes['rolling_avg_change'] = df_changes['day_change_absolute'].rolling(window=7, center=True).mean()
+    df_changes['rolling_std_change'] = df_changes['day_change_absolute'].rolling(window=7, center=True).std()
+    
+    return df_changes
+
+# ADD NEW ANALYSIS TYPE - Day-over-Day Changes (around line 280, after existing analysis types)
 
 def calculate_yearly_stats(df):
     """Calculate yearly statistics for power burns"""
@@ -142,7 +207,7 @@ yearly trends, and forecast data visualization.
 with st.sidebar:
     st.title("🧭 Navigation")
     
-    # Navigation buttons
+    # Navigation buttons - ALL 6 PAGES
     if st.button("🏠 Home", use_container_width=True):
         st.switch_page("streamlit_app.py")
     
@@ -154,6 +219,12 @@ with st.sidebar:
         
     if st.button("⚡ EIA Generation", use_container_width=True):
         st.switch_page("pages/3_EIA_Generation.py")
+        
+    if st.button("📈 Net Changes", use_container_width=True):
+        st.switch_page("pages/5_Net_Changes.py")
+        
+    if st.button("📊 Tape Analysis", use_container_width=True):
+        st.switch_page("pages/6_Tape_Analysis.py")
     
     st.markdown("---")
     st.info("📍 **Current Page:** Power Burns")
@@ -166,10 +237,10 @@ with st.sidebar:
     if min_date and max_date:
         st.write(f"**Available Data:** {min_date} to {max_date}")
         
-        # Analysis type selection
+        # Analysis type selection - ADD DAY-OVER-DAY OPTION
         analysis_type = st.selectbox(
             "Analysis Type:",
-            ["Time Series View", "Seasonal Analysis", "Yearly Comparison", "Historical vs Forecast"],
+            ["Time Series View", "Day-over-Day Changes", "Seasonal Analysis", "Yearly Comparison", "Historical vs Forecast"],
             help="Choose the type of analysis to perform"
         )
         
@@ -207,7 +278,166 @@ with st.sidebar:
                 default=available_years[-3:] if len(available_years) >= 3 else available_years,
                 help="Choose years to overlay for comparison"
             )
+# ADD NEW ANALYSIS TYPE - Day-over-Day Changes (around line 280, after existing analysis types)
+        elif analysis_type == "Day-over-Day Changes":
+            st.subheader("📊 Day-over-Day Power Burns Changes")
             
+            # Load all data for change analysis
+            df = get_power_burns_data()
+            
+            if df.empty:
+                st.warning("No data available for day-over-day analysis.")
+            else:
+                # Calculate changes
+                changes_df = calculate_day_over_day_changes(df)
+                
+                if changes_df.empty:
+                    st.warning("Insufficient data for day-over-day analysis (need at least 2 days).")
+                else:
+                    # Display key metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    avg_daily_change = changes_df['day_change_absolute'].mean()
+                    max_increase = changes_df['day_change_absolute'].max()
+                    max_decrease = changes_df['day_change_absolute'].min()
+                    volatility = changes_df['day_change_absolute'].std()
+                    
+                    with col1:
+                        st.metric("Avg Daily Change", f"{avg_daily_change:+.1f} Bcf/d")
+                    with col2:
+                        st.metric("Largest Increase", f"{max_increase:+.1f} Bcf/d")
+                    with col3:
+                        st.metric("Largest Decrease", f"{max_decrease:+.1f} Bcf/d")
+                    with col4:
+                        st.metric("Daily Volatility", f"{volatility:.1f} Bcf/d")
+                    
+                    # Create day-over-day change visualization
+                    fig = make_subplots(
+                        rows=3, cols=1,
+                        subplot_titles=[
+                            'Daily Power Burns with Changes',
+                            'Day-over-Day Absolute Changes (Bcf/d)', 
+                            'Day-over-Day Percentage Changes (%)'
+                        ],
+                        vertical_spacing=0.08,
+                        row_heights=[0.4, 0.3, 0.3]
+                    )
+                    
+                    # Original power burns line
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pd.to_datetime(changes_df['report_date']),
+                            y=changes_df['L48_Power_Burns'],
+                            mode='lines',
+                            name='Power Burns',
+                            line=dict(color='#ff6b35', width=2),
+                            hovertemplate="Date: %{x}<br>Power Burns: %{y:.1f} Bcf/d<extra></extra>"
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    # Absolute changes bar chart
+                    colors = ['red' if x < 0 else 'green' for x in changes_df['day_change_absolute']]
+                    fig.add_trace(
+                        go.Bar(
+                            x=pd.to_datetime(changes_df['report_date']),
+                            y=changes_df['day_change_absolute'],
+                            name='Daily Change',
+                            marker_color=colors,
+                            hovertemplate="Date: %{x}<br>Change: %{y:+.1f} Bcf/d<extra></extra>"
+                        ),
+                        row=2, col=1
+                    )
+                    
+                    # Add rolling average line for absolute changes
+                    if 'rolling_avg_change' in changes_df.columns:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=pd.to_datetime(changes_df['report_date']),
+                                y=changes_df['rolling_avg_change'],
+                                mode='lines',
+                                name='7-Day Avg Change',
+                                line=dict(color='blue', width=2, dash='dash'),
+                                hovertemplate="7-Day Avg: %{y:+.1f} Bcf/d<extra></extra>"
+                            ),
+                            row=2, col=1
+                        )
+                    
+                    # Percentage changes
+                    pct_colors = ['red' if x < 0 else 'green' for x in changes_df['day_change_percentage']]
+                    fig.add_trace(
+                        go.Bar(
+                            x=pd.to_datetime(changes_df['report_date']),
+                            y=changes_df['day_change_percentage'],
+                            name='% Change',
+                            marker_color=pct_colors,
+                            hovertemplate="Date: %{x}<br>Change: %{y:+.1f}%<extra></extra>"
+                        ),
+                        row=3, col=1
+                    )
+                    
+                    # Add horizontal reference lines
+                    fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=2, col=1)
+                    fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=3, col=1)
+                    
+                    fig.update_layout(height=800, showlegend=False)
+                    fig.update_xaxes(title_text="Date", row=3, col=1)
+                    fig.update_yaxes(title_text="Power Burns (Bcf/d)", row=1, col=1)
+                    fig.update_yaxes(title_text="Change (Bcf/d)", row=2, col=1)
+                    fig.update_yaxes(title_text="Change (%)", row=3, col=1)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Statistical summary table
+                    st.subheader("📈 Change Statistics Summary")
+                    
+                    stats_data = {
+                        'Metric': [
+                            'Average Daily Change',
+                            'Median Daily Change', 
+                            'Standard Deviation',
+                            'Largest Single Increase',
+                            'Largest Single Decrease',
+                            'Days with Increases',
+                            'Days with Decreases',
+                            'Average % Change',
+                            'Max % Increase',
+                            'Max % Decrease'
+                        ],
+                        'Value': [
+                            f"{changes_df['day_change_absolute'].mean():+.2f} Bcf/d",
+                            f"{changes_df['day_change_absolute'].median():+.2f} Bcf/d",
+                            f"{changes_df['day_change_absolute'].std():.2f} Bcf/d",
+                            f"{changes_df['day_change_absolute'].max():+.2f} Bcf/d",
+                            f"{changes_df['day_change_absolute'].min():+.2f} Bcf/d",
+                            f"{(changes_df['day_change_absolute'] > 0).sum()} days",
+                            f"{(changes_df['day_change_absolute'] < 0).sum()} days",
+                            f"{changes_df['day_change_percentage'].mean():+.2f}%",
+                            f"{changes_df['day_change_percentage'].max():+.2f}%",
+                            f"{changes_df['day_change_percentage'].min():+.2f}%"
+                        ]
+                    }
+                    
+                    stats_df = pd.DataFrame(stats_data)
+                    st.dataframe(stats_df, use_container_width=True)
+                    
+                    # Recent changes highlight
+                    st.subheader("🔥 Recent Daily Changes (Last 10 Days)")
+                    recent_changes = changes_df.tail(10)[['report_date', 'L48_Power_Burns', 'day_change_absolute', 'day_change_percentage']].copy()
+                    recent_changes.columns = ['Date', 'Power Burns (Bcf/d)', 'Daily Change (Bcf/d)', 'Daily Change (%)']
+                    
+                    # Format the display
+                    recent_changes['Power Burns (Bcf/d)'] = recent_changes['Power Burns (Bcf/d)'].apply(lambda x: f"{x:.1f}")
+                    recent_changes['Daily Change (Bcf/d)'] = recent_changes['Daily Change (Bcf/d)'].apply(lambda x: f"{x:+.1f}")
+                    recent_changes['Daily Change (%)'] = recent_changes['Daily Change (%)'].apply(lambda x: f"{x:+.1f}%")
+                    
+                    st.dataframe(recent_changes, use_container_width=True)
+
+
+
+
+
+
         elif analysis_type == "Historical vs Forecast":
             # Split point for historical vs forecast
             current_year = datetime.now().year
@@ -233,6 +463,10 @@ with st.sidebar:
 engine = get_db_engine()
 if not engine: 
     st.stop()
+
+
+
+
 
 # Main content area
 if min_date and max_date:
