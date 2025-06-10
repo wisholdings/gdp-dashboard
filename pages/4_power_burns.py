@@ -151,6 +151,34 @@ def calculate_day_over_day_changes(df):
     
     return df_changes
 
+def get_forecast_evolution_data(target_start_date, target_end_date):
+    """Get how forecasts for specific dates evolved over time"""
+    engine = get_db_engine()
+    
+    try:
+        # Get all forecasts for the target date range, grouped by publication date
+        query = f"""
+            SELECT report_date, L48_Power_Burns, date_published 
+            FROM power_burns_daily 
+            WHERE report_date BETWEEN '{target_start_date}' AND '{target_end_date}'
+            ORDER BY report_date ASC, date_published ASC
+        """
+        
+        df = pd.read_sql_query(query, engine)
+        
+        if not df.empty:
+            df['report_date'] = pd.to_datetime(df['report_date']).dt.date
+            df['date_published'] = pd.to_datetime(df['date_published']).dt.date
+            
+            # Divide by 1000 to correct values
+            df['L48_Power_Burns'] = pd.to_numeric(df['L48_Power_Burns'], errors='coerce') / 1000
+            
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching forecast evolution data: {e}")
+        return pd.DataFrame()
+
 # --- PAGE CONTENT ---
 st.title("🔥 Natural Gas Power Burns Analysis")
 st.markdown("---")
@@ -159,7 +187,7 @@ st.markdown("""
 **Analyze daily natural gas consumption for power generation in the Lower 48 states.**
 
 This page provides comprehensive analysis of power burns data spanning 2019-2028, including seasonal patterns, 
-yearly trends, and forecast data visualization.
+yearly trends, and forecast evolution analysis.
 """)
 
 # Sidebar controls
@@ -196,10 +224,10 @@ with st.sidebar:
     if min_date and max_date:
         st.write(f"**Available Data:** {min_date} to {max_date}")
         
-        # Analysis type selection
+        # Analysis type selection - UPDATED
         analysis_type = st.selectbox(
             "Analysis Type:",
-            ["Time Series View", "Day-over-Day Changes", "Seasonal Analysis", "Yearly Comparison", "Historical vs Forecast"],
+            ["Time Series View", "Day-over-Day Changes", "Seasonal Analysis", "Yearly Comparison", "Forecast Evolution"],
             help="Choose the type of analysis to perform"
         )
         
@@ -238,16 +266,30 @@ with st.sidebar:
                 help="Choose years to overlay for comparison"
             )
             
-        elif analysis_type == "Historical vs Forecast":
-            # Split point for historical vs forecast
-            current_year = datetime.now().year
-            historical_cutoff = st.date_input(
-                "Historical/Forecast Split:",
-                value=date(current_year, 1, 1),
+        elif analysis_type == "Forecast Evolution":
+            # NEW: Date range selection for forecast evolution analysis
+            st.subheader("📅 Forecast Date Range")
+            
+            # Select the dates you want to see forecasts for
+            forecast_start_date = st.date_input(
+                "Forecast Start Date:",
+                value=max(min_date, datetime.now().date() - timedelta(days=7)),
                 min_value=min_date,
                 max_value=max_date,
-                help="Data before this date is historical, after is forecast"
+                help="Starting date for forecast period you want to analyze"
             )
+            
+            forecast_end_date = st.date_input(
+                "Forecast End Date:",
+                value=min(max_date, datetime.now().date() + timedelta(days=14)),
+                min_value=min_date,
+                max_value=max_date,
+                help="Ending date for forecast period you want to analyze"
+            )
+            
+            if forecast_start_date > forecast_end_date:
+                st.error("Forecast start date must be before end date")
+                st.stop()
         
         # Chart options
         st.subheader("📈 Chart Options")
@@ -560,7 +602,7 @@ if min_date and max_date:
             st.subheader("📊 Seasonal Statistics Summary")
             st.dataframe(seasonal_stats, use_container_width=True)
     
-    elif analysis_type == "Yearly Comparison" and 'selected_years' in locals() and selected_years:
+    elif analysis_type == "Yearly Comparison" and selected_years:
         st.subheader(f"📊 Yearly Comparison ({', '.join(map(str, selected_years))})")
         
         # Load all data
@@ -606,91 +648,186 @@ if min_date and max_date:
             st.subheader("📊 Yearly Statistics")
             st.dataframe(yearly_stats, use_container_width=True)
     
-    elif analysis_type == "Historical vs Forecast" and 'historical_cutoff' in locals():
-        st.subheader(f"🔮 Historical vs Forecast Analysis (Split: {historical_cutoff})")
+    elif analysis_type == "Forecast Evolution":
+        st.subheader(f"🔮 Forecast Evolution Analysis ({forecast_start_date} to {forecast_end_date})")
         
-        # Load all data
-        df = get_power_burns_data()
+        # Load forecast evolution data
+        forecast_df = get_forecast_evolution_data(forecast_start_date, forecast_end_date)
         
-        if df.empty:
-            st.warning("No data available for historical vs forecast analysis.")
+        if forecast_df.empty:
+            st.warning("No forecast data available for the selected date range.")
         else:
-            # Split data into historical and forecast
-            df['report_date_dt'] = pd.to_datetime(df['report_date'])
-            cutoff_dt = pd.to_datetime(historical_cutoff)
+            # Show available publication dates
+            available_pub_dates = sorted(forecast_df['date_published'].unique())
             
-            historical_data = df[df['report_date_dt'] < cutoff_dt]
-            forecast_data = df[df['report_date_dt'] >= cutoff_dt]
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Target Dates", f"{(forecast_end_date - forecast_start_date).days + 1}")
+            with col2:
+                st.metric("Publication Dates", len(available_pub_dates))
+            with col3:
+                st.metric("Total Forecasts", len(forecast_df))
             
-            # Create comparison plot
+            st.info(f"**Publication Dates Available:** {min(available_pub_dates)} to {max(available_pub_dates)}")
+            
+            # Create forecast evolution visualization
             fig = go.Figure()
             
-            if not historical_data.empty:
-                fig.add_trace(go.Scatter(
-                    x=historical_data['report_date_dt'],
-                    y=historical_data['L48_Power_Burns'],
-                    mode='lines',
-                    name='Historical',
-                    line=dict(color='#004e89', width=2),
-                    hovertemplate="Historical<br>Date: %{x}<br>Power Burns: %{y:.1f} Bcf/d<extra></extra>"
-                ))
+            # Color palette for different publication dates
+            colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
             
-            if not forecast_data.empty:
-                fig.add_trace(go.Scatter(
-                    x=forecast_data['report_date_dt'],
-                    y=forecast_data['L48_Power_Burns'],
-                    mode='lines',
-                    name='Forecast',
-                    line=dict(color='#ff6b35', width=2, dash='dash'),
-                    hovertemplate="Forecast<br>Date: %{x}<br>Power Burns: %{y:.1f} Bcf/d<extra></extra>"
-                ))
-            
-            # Add vertical line at split point
-            fig.add_vline(
-                x=cutoff_dt,
-                line_dash="dot",
-                line_color="red",
-                annotation_text="Historical/Forecast Split"
-            )
+            # Plot each publication date as a separate line
+            for i, pub_date in enumerate(available_pub_dates):
+                pub_data = forecast_df[forecast_df['date_published'] == pub_date].copy()
+                
+                if not pub_data.empty:
+                    pub_data = pub_data.sort_values('report_date')
+                    
+                    # Determine line style (solid for recent, dashed for older)
+                    is_recent = pub_date >= max(available_pub_dates) - timedelta(days=7)
+                    line_style = 'solid' if is_recent else 'dash'
+                    line_width = 3 if is_recent else 2
+                    
+                    fig.add_trace(go.Scatter(
+                        x=pd.to_datetime(pub_data['report_date']),
+                        y=pub_data['L48_Power_Burns'],
+                        mode='lines+markers',
+                        name=f"Published {pub_date}",
+                        line=dict(
+                            color=colors[i % len(colors)], 
+                            width=line_width, 
+                            dash=line_style
+                        ),
+                        marker=dict(size=6),
+                        hovertemplate=f"Published: {pub_date}<br>Report Date: %{{x}}<br>Forecast: %{{y:.1f}} Bcf/d<extra></extra>"
+                    ))
             
             fig.update_layout(
-                title="Historical vs Forecast Power Burns",
-                xaxis_title="Date",
+                title="Power Burns Forecast Evolution - How Forecasts Changed Over Time",
+                xaxis_title="Report Date (Forecast Target Date)",
                 yaxis_title="Power Burns (Bcf/d)",
                 hovermode='x unified',
-                height=500
+                height=600,
+                showlegend=True,
+                legend=dict(
+                    orientation="v",
+                    yanchor="top",
+                    y=1,
+                    xanchor="left",
+                    x=1.02
+                )
             )
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Summary statistics
-            col1, col2 = st.columns(2)
+            # Forecast accuracy analysis for specific dates
+            st.subheader("📊 Forecast Accuracy Analysis")
             
-            with col1:
-                if not historical_data.empty:
-                    st.subheader("📊 Historical Statistics")
-                    hist_stats = {
-                        'Data Points': len(historical_data),
-                        'Average Burns': f"{historical_data['L48_Power_Burns'].mean():.1f} Bcf/d",
-                        'Peak Burns': f"{historical_data['L48_Power_Burns'].max():.1f} Bcf/d",
-                        'Min Burns': f"{historical_data['L48_Power_Burns'].min():.1f} Bcf/d",
-                        'Std Deviation': f"{historical_data['L48_Power_Burns'].std():.1f} Bcf/d"
-                    }
-                    for key, value in hist_stats.items():
-                        st.metric(key, value)
+            # Select a specific target date for detailed analysis
+            available_target_dates = sorted(forecast_df['report_date'].unique())
             
-            with col2:
-                if not forecast_data.empty:
-                    st.subheader("🔮 Forecast Statistics")
-                    forecast_stats = {
-                        'Data Points': len(forecast_data),
-                        'Average Burns': f"{forecast_data['L48_Power_Burns'].mean():.1f} Bcf/d",
-                        'Peak Burns': f"{forecast_data['L48_Power_Burns'].max():.1f} Bcf/d",
-                        'Min Burns': f"{forecast_data['L48_Power_Burns'].min():.1f} Bcf/d",
-                        'Std Deviation': f"{forecast_data['L48_Power_Burns'].std():.1f} Bcf/d"
-                    }
-                    for key, value in forecast_stats.items():
-                        st.metric(key, value)
+            selected_target_date = st.selectbox(
+                "Select a specific date to analyze forecast evolution:",
+                options=available_target_dates,
+                index=len(available_target_dates)//2,  # Default to middle date
+                help="See how the forecast for this specific date evolved over time"
+            )
+            
+            if selected_target_date:
+                target_forecasts = forecast_df[forecast_df['report_date'] == selected_target_date].copy()
+                target_forecasts = target_forecasts.sort_values('date_published')
+                
+                if not target_forecasts.empty:
+                    # Show forecast evolution for this specific date
+                    fig2 = go.Figure()
+                    
+                    fig2.add_trace(go.Scatter(
+                        x=pd.to_datetime(target_forecasts['date_published']),
+                        y=target_forecasts['L48_Power_Burns'],
+                        mode='lines+markers',
+                        name=f'Forecast for {selected_target_date}',
+                        line=dict(color='#ff6b35', width=3),
+                        marker=dict(size=8),
+                        hovertemplate="Published: %{x}<br>Forecast: %{y:.1f} Bcf/d<extra></extra>"
+                    ))
+                    
+                    # Add final forecast line
+                    final_forecast = target_forecasts['L48_Power_Burns'].iloc[-1]
+                    fig2.add_hline(
+                        y=final_forecast,
+                        line_dash="dot",
+                        line_color="red",
+                        annotation_text=f"Final Forecast: {final_forecast:.1f} Bcf/d"
+                    )
+                    
+                    fig2.update_layout(
+                        title=f"Forecast Evolution for {selected_target_date}",
+                        xaxis_title="Publication Date",
+                        yaxis_title="Forecasted Power Burns (Bcf/d)",
+                        height=400
+                    )
+                    
+                    st.plotly_chart(fig2, use_container_width=True)
+                    
+                    # Calculate forecast changes
+                    target_forecasts['forecast_change'] = target_forecasts['L48_Power_Burns'].diff()
+                    target_forecasts['forecast_change_pct'] = target_forecasts['L48_Power_Burns'].pct_change() * 100
+                    
+                    # Display forecast evolution table
+                    st.subheader(f"📋 Forecast Changes for {selected_target_date}")
+                    
+                    display_forecasts = target_forecasts[['date_published', 'L48_Power_Burns', 'forecast_change', 'forecast_change_pct']].copy()
+                    display_forecasts.columns = ['Publication Date', 'Forecast (Bcf/d)', 'Change (Bcf/d)', 'Change (%)']
+                    
+                    # Format display
+                    display_forecasts['Forecast (Bcf/d)'] = display_forecasts['Forecast (Bcf/d)'].apply(lambda x: f"{x:.1f}")
+                    display_forecasts['Change (Bcf/d)'] = display_forecasts['Change (Bcf/d)'].apply(lambda x: f"{x:+.1f}" if pd.notna(x) else "—")
+                    display_forecasts['Change (%)'] = display_forecasts['Change (%)'].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "—")
+                    
+                    st.dataframe(display_forecasts, use_container_width=True)
+                    
+                    # Forecast volatility metrics
+                    if len(target_forecasts) > 1:
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        forecast_std = target_forecasts['L48_Power_Burns'].std()
+                        forecast_range = target_forecasts['L48_Power_Burns'].max() - target_forecasts['L48_Power_Burns'].min()
+                        avg_change = target_forecasts['forecast_change'].abs().mean()
+                        num_revisions = len(target_forecasts) - 1
+                        
+                        with col1:
+                            st.metric("Forecast Std Dev", f"{forecast_std:.2f} Bcf/d")
+                        with col2:
+                            st.metric("Forecast Range", f"{forecast_range:.2f} Bcf/d")
+                        with col3:
+                            st.metric("Avg Revision", f"{avg_change:.2f} Bcf/d")
+                        with col4:
+                            st.metric("Total Revisions", num_revisions)
+            
+            # Summary statistics across all dates
+            st.subheader("📈 Overall Forecast Statistics")
+            
+            # Calculate forecast volatility for each target date
+            volatility_stats = []
+            
+            for target_date in available_target_dates:
+                date_forecasts = forecast_df[forecast_df['report_date'] == target_date]
+                if len(date_forecasts) > 1:
+                    volatility = date_forecasts['L48_Power_Burns'].std()
+                    range_val = date_forecasts['L48_Power_Burns'].max() - date_forecasts['L48_Power_Burns'].min()
+                    num_forecasts = len(date_forecasts)
+                    
+                    volatility_stats.append({
+                        'Target Date': target_date,
+                        'Num Forecasts': num_forecasts,
+                        'Volatility (Std)': f"{volatility:.2f}",
+                        'Range': f"{range_val:.2f}",
+                        'Final Forecast': f"{date_forecasts['L48_Power_Burns'].iloc[-1]:.1f}"
+                    })
+            
+            if volatility_stats:
+                volatility_df = pd.DataFrame(volatility_stats)
+                st.dataframe(volatility_df, use_container_width=True)
 
     # Raw data section
     with st.expander("📋 Raw Data Sample"):
