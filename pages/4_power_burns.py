@@ -1,4 +1,4 @@
-st.set_page_config(page_title="Power Burns Analysis", page_icon="🔥", layout="wide")
+
 
 import streamlit as st
 import pandas as pd
@@ -12,7 +12,7 @@ import calendar
 from sqlalchemy import create_engine, inspect, text 
 from sqlalchemy.exc import OperationalError, ProgrammingError 
 import mysql.connector 
-
+st.set_page_config(page_title="Power Burns Analysis", page_icon="🔥", layout="wide")
 # --- HARDCODED DATABASE CREDENTIALS (FOR TESTING ONLY) ---
 HARDCODED_DB_HOST = "34.66.61.153" 
 HARDCODED_DB_DATABASE = "test"
