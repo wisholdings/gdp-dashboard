@@ -258,7 +258,8 @@ with st.sidebar:
     # Navigation buttons
     if st.button("🏠 Home", use_container_width=True):
         st.switch_page("streamlit_app.py")
-    
+    if st.button("📊 Historical OI", use_container_width=True):
+        st.switch_page("pages/1_Historical_OI.py")    
     if st.button("🔮 Future Contracts", use_container_width=True):
         st.switch_page("pages/2_Future_Contracts.py")
         
