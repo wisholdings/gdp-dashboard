@@ -1,3 +1,5 @@
+st.set_page_config(page_title="Power Burns Analysis", page_icon="🔥", layout="wide")
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, date
