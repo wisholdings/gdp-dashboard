@@ -497,3 +497,12 @@ except Exception as e:
 
 st.markdown("---")
 st.markdown("**💾 Data Sources:** Databento (NG Futures) | EIA (Generation) | **🔄 Updates:** Every hour")
+import os
+st.write("Files in pages directory:")
+try:
+    files = os.listdir("pages")
+    st.write(files)
+except Exception as e:
+    st.write(f"Error listing files: {e}")
+
+st.write("Power Burns exists:", os.path.exists("pages/4_Power_Burns.py"))
