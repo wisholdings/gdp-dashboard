@@ -256,6 +256,34 @@ with st.sidebar:
                 st.error("Start date must be before end date")
                 st.stop()
                 
+        elif analysis_type == "Day-over-Day Changes":
+            # NEW: Date range selection for day-over-day analysis
+            st.subheader("📅 Analysis Date Range")
+            
+            today = datetime.now().date()
+            default_start = max(min_date, today - timedelta(days=30))
+            default_end = min(max_date, today + timedelta(days=7))
+            
+            dod_start_date = st.date_input(
+                "Start Date:",
+                value=default_start,
+                min_value=min_date,
+                max_value=max_date,
+                help="Starting date for day-over-day analysis"
+            )
+            
+            dod_end_date = st.date_input(
+                "End Date:",
+                value=default_end,
+                min_value=min_date,
+                max_value=max_date,
+                help="Ending date for day-over-day analysis"
+            )
+            
+            if dod_start_date > dod_end_date:
+                st.error("Start date must be before end date")
+                st.stop()
+                
         elif analysis_type == "Yearly Comparison":
             # Year selection for comparison
             available_years = list(range(min_date.year, max_date.year + 1))
@@ -384,13 +412,13 @@ if min_date and max_date:
             st.plotly_chart(fig, use_container_width=True)
     
     elif analysis_type == "Day-over-Day Changes":
-        st.subheader("📊 Day-over-Day Power Burns Changes")
+        st.subheader(f"📊 Day-over-Day Power Burns Changes ({dod_start_date} to {dod_end_date})")
         
-        # Load all data for change analysis
-        df = get_power_burns_data()
+        # Load data for selected date range
+        df = get_power_burns_data(dod_start_date, dod_end_date)
         
         if df.empty:
-            st.warning("No data available for day-over-day analysis.")
+            st.warning("No data available for day-over-day analysis in the selected date range.")
         else:
             # Calculate changes
             changes_df = calculate_day_over_day_changes(df)
