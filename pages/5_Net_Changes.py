@@ -73,7 +73,7 @@ def get_aggregated_generation_data(start_date=None, end_date=None):
             
             # FIXED: Build query with date_published filter AND timestamp filtering if provided
             base_query = f"""
-                SELECT timestamp, *
+                SELECT *
                 FROM `{table}` 
                 WHERE DATE(date_published) = '{today}'
             """
