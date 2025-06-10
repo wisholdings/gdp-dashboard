@@ -115,11 +115,11 @@ if not generation_tables:
     st.warning("⚠️ No hourly generation tables found in the database.")
     st.stop()
 
-# Sidebar controls
+# Sidebar controls - FIXED VERSION
 with st.sidebar:
     st.title("🧭 Navigation")
     
-    # Navigation buttons
+    # Navigation buttons - NOW INCLUDES ALL 6 PAGES
     if st.button("🏠 Home", use_container_width=True):
         st.switch_page("streamlit_app.py")
     
@@ -128,6 +128,15 @@ with st.sidebar:
         
     if st.button("🔮 Future Contracts", use_container_width=True):
         st.switch_page("pages/2_Future_Contracts.py")
+        
+    if st.button("📈 Net Changes", use_container_width=True):
+        st.switch_page("pages/5_Net_Changes.py")
+        
+    if st.button("📊 Tape Analysis", use_container_width=True):
+        st.switch_page("pages/6_Tape_Analysis.py")
+        
+    if st.button("🔥 Power Burns", use_container_width=True):
+        st.switch_page("pages/4_Power_Burns.py")
     
     st.markdown("---")
     st.info("📍 **Current Page:** EIA Generation")
@@ -153,8 +162,9 @@ with st.sidebar:
         
         st.write(f"Available: {min_date} to {max_date}")
         
-        # Default to last 7 days
-        default_start = max(min_date, max_date - timedelta(days=7))
+        # FIXED: Default to 4 days before today (instead of last 7 days)
+        today = datetime.now().date()
+        default_start = max(min_date, today - timedelta(days=4))
         
         start_date = st.date_input(
             "Start Date",
@@ -182,7 +192,6 @@ with st.sidebar:
     show_load = st.checkbox("Show Load Demand", value=True)
     show_generation = st.checkbox("Show Generation Sources", value=True)
     stack_chart = st.checkbox("Stack Generation Sources", value=False)
-
 # Main content area
 if selected_table:
     region_name = parse_table_name(selected_table)
