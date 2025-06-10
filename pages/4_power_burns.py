@@ -66,7 +66,9 @@ def get_power_burns_data(start_date=None, end_date=None):
         if not df.empty:
             df['report_date'] = pd.to_datetime(df['report_date']).dt.date
             df['date_published'] = pd.to_datetime(df['date_published'])
-            df['L48_Power_Burns'] = pd.to_numeric(df['L48_Power_Burns'], errors='coerce')
+            
+            # FIXED: Divide by 1000 to correct the values
+            df['L48_Power_Burns'] = pd.to_numeric(df['L48_Power_Burns'], errors='coerce') / 1000
             
             # Add derived columns for analysis
             df['year'] = pd.to_datetime(df['report_date']).dt.year
@@ -79,7 +81,6 @@ def get_power_burns_data(start_date=None, end_date=None):
     except Exception as e:
         st.error(f"Error fetching power burns data: {e}")
         return pd.DataFrame()
-
 @st.cache_data(ttl=3600)
 def get_data_date_range():
     """Get the available date range for power burns data"""
@@ -174,8 +175,10 @@ with st.sidebar:
         
         # Date range selection based on analysis type
         if analysis_type == "Time Series View":
-            # Default to last 2 years for time series
-            default_start = max(min_date, max_date - timedelta(days=730))
+            # FIXED: Default to 4 days before today and 20 days into future
+            today = datetime.now().date()
+            default_start = max(min_date, today - timedelta(days=4))
+            default_end = min(max_date, today + timedelta(days=20))
             
             start_date = st.date_input(
                 "Start Date",
@@ -186,7 +189,7 @@ with st.sidebar:
             
             end_date = st.date_input(
                 "End Date", 
-                value=max_date,
+                value=default_end,  # CHANGED: Now uses default_end instead of max_date
                 min_value=min_date,
                 max_value=max_date
             )
