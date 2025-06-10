@@ -154,24 +154,24 @@ if not generation_tables:
 with st.sidebar:
     st.title("🧭 Navigation")
     
-    # Navigation buttons - NOW INCLUDES ALL 6 PAGES
+    # Navigation buttons
     if st.button("🏠 Home", use_container_width=True):
         st.switch_page("streamlit_app.py")
     
-    if st.button("📊 Historical OI", use_container_width=True):
-        st.switch_page("pages/1_Historical_OI.py")
-        
     if st.button("🔮 Future Contracts", use_container_width=True):
         st.switch_page("pages/2_Future_Contracts.py")
         
+    if st.button("⚡ EIA Generation", use_container_width=True):
+        st.switch_page("pages/3_EIA_Generation.py")
+    if st.button("🔥 Power Burns", use_container_width=True):
+        st.switch_page("pages/4_Power_Burns.py")        
     if st.button("📈 Net Changes", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
         
     if st.button("📊 Tape Analysis", use_container_width=True):
         st.switch_page("pages/6_Tape_Analysis.py")
         
-    if st.button("🔥 Power Burns", use_container_width=True):
-        st.switch_page("pages/4_Power_Burns.py")
+
     
     st.markdown("---")
     st.info("📍 **Current Page:** EIA Generation")

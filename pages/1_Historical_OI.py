@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, date
-import re
-from dateutil.relativedelta import relativedelta
-import calendar
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import numpy as np
-import os 
+import calendar
 
 # Import SQLAlchemy components
 from sqlalchemy import create_engine, inspect, text 
@@ -20,14 +18,6 @@ HARDCODED_DB_USER = "root"
 HARDCODED_DB_PASSWORD = "TrumpMick2024!!" # Your actual DB password
 HARDCODED_DB_PORT = 3306 
 # -------------------------------------------------------------------------------
-
-# Constants for contract generation
-PRODUCT_SYMBOL = "NG"
-FUTURES_MONTH_CODES = {
-    1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
-    7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z",
-}
-FUTURES_MONTH_CODES_REV = {v: k for k, v in FUTURES_MONTH_CODES.items()}
 
 # --- Database Connection and Caching ---
 
@@ -47,134 +37,95 @@ def get_db_engine():
         
         return engine
     except Exception as e:
-        st.error(f"Error connecting to database. Please ensure your Cloud SQL instance is running, "
-                 f"its public IP is correct, and that the environment's outbound IP is authorized (`0.0.0.0/0` if on App Engine). "
-                 f"Also check database user/password are correct. Full error: {e}")
+        st.error(f"Error connecting to database: {e}")
         st.stop() 
 
-def get_contract_expiry_date(year, month):
-    """Calculate the expiry date for a natural gas contract (last day of month before delivery month)"""
-    exp_year = year
-    exp_month = month - 1
-    if exp_month == 0:
-        exp_month = 12
-        exp_year -= 1
-    
-    try:
-        expiration_day = calendar.monthrange(exp_year, exp_month)[1]
-        return datetime(exp_year, exp_month, expiration_day).date()
-    except ValueError:
-        return datetime(year, month, 1).date()
-
 @st.cache_data(ttl=3600)
-def get_all_contract_table_names(product_symbol="ng"):
-    engine = get_db_engine()
-    inspector = inspect(engine)
-    all_table_names = inspector.get_table_names()
-    
-    futures_tables = [
-        t for t in all_table_names 
-        if t.startswith(product_symbol.lower()) and re.match(rf"^{product_symbol.lower()}\d{{2}}\d{{4}}$", t)
-    ]
-    futures_tables.sort() 
-    return futures_tables
-
-@st.cache_data(ttl=3600)
-def get_contract_data_from_db(table_name: str):
+def get_power_burns_data(start_date=None, end_date=None):
+    """Fetch power burns data from the database"""
     engine = get_db_engine()
     df = pd.DataFrame()
+    
     try:
-        query = f"SELECT trade_date, open_interest, settlement_price FROM `{table_name.lower()}` ORDER BY trade_date ASC"
-            
+        # Get today's date for filtering
+        today = date.today()
+        
+        # Base query - filter by today's date_published
+        base_query = f"""
+            SELECT report_date, L48_Power_Burns, date_published 
+            FROM power_burns_daily 
+            WHERE DATE(date_published) = '{today}'
+        """
+        
+        # Add date filtering if provided
+        if start_date and end_date:
+            query = f"""
+                {base_query}
+                AND report_date BETWEEN '{start_date}' AND '{end_date}'
+                ORDER BY report_date ASC
+            """
+        else:
+            query = f"{base_query} ORDER BY report_date ASC"
+        
         df = pd.read_sql_query(query, engine)
         
         if not df.empty:
-            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.date
-            df['open_interest'] = pd.to_numeric(df['open_interest'], errors='coerce')
-            df['settlement_price'] = pd.to_numeric(df['settlement_price'], errors='coerce')
+            df['report_date'] = pd.to_datetime(df['report_date']).dt.date
+            df['date_published'] = pd.to_datetime(df['date_published'])
+            df['L48_Power_Burns'] = pd.to_numeric(df['L48_Power_Burns'], errors='coerce')
+            
+            # Add derived columns for analysis
+            df['year'] = pd.to_datetime(df['report_date']).dt.year
+            df['month'] = pd.to_datetime(df['report_date']).dt.month
+            df['day_of_year'] = pd.to_datetime(df['report_date']).dt.dayofyear
+            df['quarter'] = pd.to_datetime(df['report_date']).dt.quarter
+            
+        return df
         
     except Exception as e:
-        st.error(f"Error fetching data for table '{table_name}': {e}")
-    return df
+        st.error(f"Error fetching power burns data: {e}")
+        return pd.DataFrame()
 
-def get_historical_contracts_only():
-    """Get only contracts that have already expired"""
-    all_futures_table_names = get_all_contract_table_names(PRODUCT_SYMBOL)
-    historical_contracts = []
-    current_date = datetime.now().date()
-    
-    for table_name in all_futures_table_names:
-        match = re.match(rf"^{PRODUCT_SYMBOL.lower()}(\d{{2}})(\d{{4}})$", table_name)
-        if match:
-            month_num = int(match.group(1))
-            year_full = int(match.group(2))
-            month_code = FUTURES_MONTH_CODES.get(month_num)
-            
-            if month_code:
-                # Calculate expiry date
-                expiry_date = get_contract_expiry_date(year_full, month_num)
-                
-                # Only include if contract has already expired
-                if expiry_date < current_date:
-                    display_symbol = f"{PRODUCT_SYMBOL}{month_code}{year_full%100:02d}"
-                    historical_contracts.append({
-                        'symbol': display_symbol,
-                        'month_num': month_num,
-                        'year': year_full,
-                        'expiry_date': expiry_date,
-                        'table_name': table_name
-                    })
-    
-    return sorted(historical_contracts, key=lambda x: x['expiry_date'], reverse=True)
-
-def get_contracts_for_same_month(target_month_num, target_year):
-    """Get all historical contracts for the same delivery month"""
-    all_futures_table_names = get_all_contract_table_names(PRODUCT_SYMBOL)
-    same_month_contracts = []
-    current_date = datetime.now().date()
-    
-    for table_name in all_futures_table_names:
-        match = re.match(rf"^{PRODUCT_SYMBOL.lower()}(\d{{2}})(\d{{4}})$", table_name)
-        if match:
-            month_num = int(match.group(1))
-            year_full = int(match.group(2))
-            month_code = FUTURES_MONTH_CODES.get(month_num)
-            
-            if month_code and month_num == target_month_num:
-                expiry_date = get_contract_expiry_date(year_full, month_num)
-                
-                # Only include if contract has already expired
-                if expiry_date < current_date:
-                    display_symbol = f"{PRODUCT_SYMBOL}{month_code}{year_full%100:02d}"
-                    same_month_contracts.append({
-                        'symbol': display_symbol,
-                        'month_num': month_num,
-                        'year': year_full,
-                        'expiry_date': expiry_date,
-                        'table_name': table_name
-                    })
-    
-    return sorted(same_month_contracts, key=lambda x: x['year'])
-
-def calculate_days_to_expiry(trade_dates, expiry_date):
-    """Calculate days to expiry for each trade date"""
-    return [(expiry_date - trade_date).days for trade_date in trade_dates]
+@st.cache_data(ttl=3600)
+def get_data_date_range():
+    """Get the available date range for power burns data"""
+    engine = get_db_engine()
+    today = date.today()
+    try:
+        query = f"""
+            SELECT MIN(report_date) as min_date, MAX(report_date) as max_date 
+            FROM power_burns_daily 
+            WHERE DATE(date_published) = '{today}'
+        """
+        result = pd.read_sql_query(query, engine)
+        if not result.empty and result['min_date'].iloc[0] is not None:
+            min_date = pd.to_datetime(result['min_date'].iloc[0]).date()
+            max_date = pd.to_datetime(result['max_date'].iloc[0]).date()
+            return min_date, max_date
+    except Exception as e:
+        st.error(f"Error getting date range: {e}")
+    return None, None
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Historical Open Interest", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Power Burns Analysis", page_icon="🔥", layout="wide")
 
 # --- PAGE CONTENT ---
-st.title("📊 Historical Open Interest Analysis")
+st.title("🔥 Natural Gas Power Burns Analysis")
 st.markdown("---")
 
-st.markdown("""
-**Compare expired contracts from the same delivery month across different years using time-to-expiry analysis.**
+# Get today's date for display
+today = date.today()
 
-This page allows you to overlay historical contracts to identify seasonal patterns, open interest build-up trends, 
-and price behavior as contracts approach expiry.
+st.markdown(f"""
+**Analyze daily natural gas consumption for power generation in the Lower 48 states.**
+
+**📅 Data Filter:** This page shows **ONLY today's forecast data** (date_published = {today})
+
+This page provides comprehensive analysis of power burns data, including seasonal patterns, 
+yearly trends, and forecast data visualization.
 """)
 
-# Sidebar reference
+# Sidebar controls
 with st.sidebar:
     st.title("🧭 Navigation")
     
@@ -182,195 +133,190 @@ with st.sidebar:
     if st.button("🏠 Home", use_container_width=True):
         st.switch_page("streamlit_app.py")
     
+    if st.button("📊 Historical OI", use_container_width=True):
+        st.switch_page("pages/1_Historical_OI.py")
+        
     if st.button("🔮 Future Contracts", use_container_width=True):
         st.switch_page("pages/2_Future_Contracts.py")
         
     if st.button("⚡ EIA Generation", use_container_width=True):
         st.switch_page("pages/3_EIA_Generation.py")
-    if st.button("🔥 Power Burns", use_container_width=True):
-        st.switch_page("pages/4_Power_Burns.py")        
+        
     if st.button("📈 Net Changes", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
         
     if st.button("📊 Tape Analysis", use_container_width=True):
         st.switch_page("pages/6_Tape_Analysis.py")
-        
-
     
     st.markdown("---")
-    st.info("📍 **Current Page:** Historical OI")
+    st.info("📍 **Current Page:** Power Burns")
     
-    st.subheader("📅 Futures Month Codes:")
-    for month_num, code in FUTURES_MONTH_CODES.items():
-        st.write(f"**{code}**: {calendar.month_name[month_num]}")
+    # Show today's date prominently
+    st.success(f"📅 **Data Filter:** {today}")
+    st.caption("Only showing today's published forecast data")
+    
+    st.subheader("📊 Analysis Controls")
+    
+    # Get available date range
+    min_date, max_date = get_data_date_range()
+    
+    if min_date and max_date:
+        st.write(f"**Available Forecast Period:** {min_date} to {max_date}")
+        
+        # Date range selection for forecast periods
+        st.subheader("📅 Forecast Period Filter")
+        st.caption("Filter which forecast periods to analyze")
+        
+        # Default to next 30 days of forecast
+        default_start = min_date
+        default_end = min(max_date, min_date + timedelta(days=30))
+        
+        start_date = st.date_input(
+            "Start Date",
+            value=default_start,
+            min_value=min_date,
+            max_value=max_date
+        )
+        
+        end_date = st.date_input(
+            "End Date", 
+            value=default_end,
+            min_value=min_date,
+            max_value=max_date
+        )
+        
+        if start_date > end_date:
+            st.error("Start date must be before end date")
+            st.stop()
+        
+        # Chart options
+        st.subheader("📈 Chart Options")
+        show_trend = st.checkbox("Show Trend Line", value=True)
+        show_moving_avg = st.checkbox("Show Moving Average", value=False)
+        if show_moving_avg:
+            ma_days = st.slider("Moving Average Days:", 7, 30, 14)
+    else:
+        st.error(f"Unable to determine forecast date range for today's data ({today})")
+        st.warning("This might mean today's forecast data hasn't been uploaded yet.")
+        st.stop()
 
 # Establish DB connection
 engine = get_db_engine()
 if not engine: 
     st.stop()
 
-# Select Historical Contract Only
-historical_contracts = get_historical_contracts_only()
-
-if not historical_contracts:
-    st.warning("⚠️ No expired Natural Gas futures contracts found in the database. Please ensure your ingestion script has successfully populated historical data.")
-else:
-    # Create display options
-    contract_options = [f"{contract['symbol']} (Exp: {contract['expiry_date']})" for contract in historical_contracts]
+# Main content area
+if min_date and max_date:
     
-    selected_option = st.selectbox(
-        "🎯 Select a Historical Futures Contract:", 
-        options=contract_options,
-        help="Choose an expired Natural Gas futures contract to view alongside other contracts from the same delivery month."
-    )
-
-    if selected_option:
-        # Find the selected contract
-        selected_index = contract_options.index(selected_option)
-        selected_contract = historical_contracts[selected_index]
+    # Load data
+    with st.spinner(f"Loading today's power burns forecast data ({today})..."):
+        df = get_power_burns_data(start_date, end_date)
+    
+    if df.empty:
+        st.warning(f"No power burns forecast data found for {today} in the selected period ({start_date} to {end_date}).")
+        st.info("💡 This might mean today's forecast data hasn't been uploaded yet.")
+    else:
+        # Display data info
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Data Points", f"{len(df):,}")
+        with col2:
+            avg_burns = df['L48_Power_Burns'].mean()
+            st.metric("Average Burns", f"{avg_burns:,.1f} Bcf/d")
+        with col3:
+            peak_burns = df['L48_Power_Burns'].max()
+            st.metric("Peak Burns", f"{peak_burns:,.1f} Bcf/d")
+        with col4:
+            st.metric("Published", str(today))
         
-        st.subheader(f"📈 Historical Overlay for {calendar.month_name[selected_contract['month_num']]} Delivery Contracts")
+        # Show forecast info
+        forecast_start = df['report_date'].min()
+        forecast_end = df['report_date'].max()
+        st.info(f"📊 Showing forecast from {forecast_start} to {forecast_end} (published on {today})")
         
-        # Get all contracts for the same month
-        same_month_contracts = get_contracts_for_same_month(
-            selected_contract['month_num'], 
-            selected_contract['year']
+        # Create time series plot
+        fig = go.Figure()
+        
+        # Main data line
+        fig.add_trace(go.Scatter(
+            x=pd.to_datetime(df['report_date']),
+            y=df['L48_Power_Burns'],
+            mode='lines',
+            name='Power Burns',
+            line=dict(color='#ff6b35', width=2),
+            hovertemplate="Date: %{x}<br>Power Burns: %{y:.1f} Bcf/d<extra></extra>"
+        ))
+        
+        # Add trend line if requested
+        if show_trend and len(df) > 1:
+            z = np.polyfit(range(len(df)), df['L48_Power_Burns'].dropna(), 1)
+            trend_line = np.poly1d(z)(range(len(df)))
+            
+            fig.add_trace(go.Scatter(
+                x=pd.to_datetime(df['report_date']),
+                y=trend_line,
+                mode='lines',
+                name='Trend',
+                line=dict(color='red', width=2, dash='dash'),
+                hovertemplate="Trend: %{y:.1f} Bcf/d<extra></extra>"
+            ))
+        
+        # Add moving average if requested
+        if show_moving_avg and len(df) > ma_days:
+            df_sorted = df.sort_values('report_date')
+            ma_values = df_sorted['L48_Power_Burns'].rolling(window=ma_days, center=True).mean()
+            
+            fig.add_trace(go.Scatter(
+                x=pd.to_datetime(df_sorted['report_date']),
+                y=ma_values,
+                mode='lines',
+                name=f'{ma_days}-Day MA',
+                line=dict(color='blue', width=2),
+                hovertemplate=f"{ma_days}-Day MA: %{{y:.1f}} Bcf/d<extra></extra>"
+            ))
+        
+        fig.update_layout(
+            title=f"Daily Natural Gas Power Burns Forecast - {today} Publication",
+            xaxis_title="Date",
+            yaxis_title="Power Burns (Bcf/d)",
+            hovermode='x unified',
+            height=500
         )
         
-        if len(same_month_contracts) < 2:
-            st.warning(f"⚠️ Only one contract found for {calendar.month_name[selected_contract['month_num']]} delivery. Need multiple years to create overlay.")
-        else:
-            # Show contract count
-            st.info(f"📊 Displaying {len(same_month_contracts)} contracts for {calendar.month_name[selected_contract['month_num']]} delivery")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Summary statistics
+        st.subheader("📊 Summary Statistics")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Min Burns", f"{df['L48_Power_Burns'].min():.1f} Bcf/d")
+            st.metric("Max Burns", f"{df['L48_Power_Burns'].max():.1f} Bcf/d")
+        
+        with col2:
+            st.metric("Average Burns", f"{df['L48_Power_Burns'].mean():.1f} Bcf/d")
+            st.metric("Std Deviation", f"{df['L48_Power_Burns'].std():.1f} Bcf/d")
+        
+        with col3:
+            st.metric("Total Period", f"{len(df)} days")
+            date_span = (end_date - start_date).days + 1
+            st.metric("Selected Range", f"{date_span} days")
+        
+        # Raw data section
+        with st.expander("📋 Raw Data Sample"):
+            # Show sample with key columns
+            display_cols = ['report_date', 'L48_Power_Burns', 'date_published']
+            st.dataframe(df[display_cols].head(50), use_container_width=True)
             
-            # Create overlay plots
-            fig_oi = go.Figure()
-            fig_settlement = go.Figure()
-            
-            # Define colors manually to avoid plotly express import
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-            
-            for i, contract in enumerate(same_month_contracts):
-                df_contract = get_contract_data_from_db(contract['table_name'])
-                
-                if not df_contract.empty:
-                    # Calculate days to expiry
-                    df_contract['days_to_expiry'] = calculate_days_to_expiry(
-                        df_contract['trade_date'], 
-                        contract['expiry_date']
-                    )
-                    
-                    # Filter valid data
-                    df_oi = df_contract[
-                        df_contract['open_interest'].notna() & 
-                        (df_contract['open_interest'] != 0) &
-                        (df_contract['days_to_expiry'] >= 0)  # Only include data before expiry
-                    ].copy()
-                    
-                    df_settlement = df_contract[
-                        df_contract['settlement_price'].notna() &
-                        (df_contract['days_to_expiry'] >= 0)  # Only include data before expiry
-                    ].copy()
-                    
-                    color = colors[i % len(colors)]
-                    contract_label = f"{contract['symbol']} ({contract['year']})"
-                    
-                    # Add Open Interest trace
-                    if not df_oi.empty:
-                        fig_oi.add_trace(go.Scatter(
-                            x=df_oi['days_to_expiry'],
-                            y=df_oi['open_interest'],
-                            mode='lines',
-                            name=contract_label,
-                            line=dict(color=color, width=2),
-                            hovertemplate=f"{contract_label}<br>" +
-                                        "Days to Expiry: %{x}<br>" +
-                                        "Open Interest: %{y:,.0f}<br>" +
-                                        "<extra></extra>"
-                        ))
-                    
-                    # Add Settlement Price trace
-                    if not df_settlement.empty:
-                        fig_settlement.add_trace(go.Scatter(
-                            x=df_settlement['days_to_expiry'],
-                            y=df_settlement['settlement_price'],
-                            mode='lines',
-                            name=contract_label,
-                            line=dict(color=color, width=2),
-                            hovertemplate=f"{contract_label}<br>" +
-                                        "Days to Expiry: %{x}<br>" +
-                                        "Settlement Price: $%{y:.2f}<br>" +
-                                        "<extra></extra>"
-                        ))
-            
-            # Update layout for Open Interest
-            fig_oi.update_layout(
-                title=f"Open Interest Overlay - {calendar.month_name[selected_contract['month_num']]} Delivery Contracts",
-                xaxis_title="Days to Expiry",
-                yaxis_title="Open Interest",
-                hovermode='closest',
-                xaxis=dict(autorange='reversed'),  # Reverse so expiry (0) is on the right
-                height=500,
-                showlegend=True
-            )
-            
-            # Update layout for Settlement Price
-            fig_settlement.update_layout(
-                title=f"Settlement Price Overlay - {calendar.month_name[selected_contract['month_num']]} Delivery Contracts",
-                xaxis_title="Days to Expiry",
-                yaxis_title="Settlement Price ($)",
-                hovermode='closest',
-                xaxis=dict(autorange='reversed'),  # Reverse so expiry (0) is on the right
-                height=500,
-                showlegend=True
-            )
-            
-            # Display plots
-            st.plotly_chart(fig_oi, use_container_width=True)
-            st.plotly_chart(fig_settlement, use_container_width=True)
-            
-            # Show summary
-            st.subheader("📋 Contract Summary")
-            summary_data = []
-            for contract in same_month_contracts:
-                df_contract = get_contract_data_from_db(contract['table_name'])
-                if not df_contract.empty:
-                    max_oi = df_contract['open_interest'].max() if df_contract['open_interest'].notna().any() else 0
-                    avg_price = df_contract['settlement_price'].mean() if df_contract['settlement_price'].notna().any() else 0
-                    data_points = len(df_contract)
-                    
-                    summary_data.append({
-                        'Contract': contract['symbol'],
-                        'Year': contract['year'],
-                        'Expiry Date': contract['expiry_date'],
-                        'Data Points': data_points,
-                        'Max Open Interest': f"{max_oi:,.0f}" if max_oi > 0 else "N/A",
-                        'Avg Settlement Price': f"${avg_price:.2f}" if avg_price > 0 else "N/A"
-                    })
-            
-            summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, use_container_width=True)
-            
-            # Analysis insights
-            st.subheader("💡 Key Insights")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("""
-                **📊 Open Interest Patterns:**
-                - Look for consistent build-up patterns across years
-                - Identify typical peak OI levels for this delivery month
-                - Notice how OI declines as expiry approaches
-                """)
-            
-            with col2:
-                st.markdown("""
-                **💰 Price Behavior:**
-                - Compare price volatility near expiry across years
-                - Identify seasonal price trends for this delivery month
-                - Spot anomalous years with unusual price action
-                """)
+            if st.button("📥 Download Full Dataset"):
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"power_burns_forecast_{today}_{start_date}_{end_date}.csv",
+                    mime="text/csv"
+                )
 
 st.markdown("---")
-st.markdown("**💾 Data Source:** Databento via automated ingestion script | **🔄 Data Updates:** Every hour")
+st.markdown(f"**💾 Data Source:** EIA Power Burns Data | **🔄 Data Updates:** Daily | **📅 Current Filter:** {today} forecast data only")
