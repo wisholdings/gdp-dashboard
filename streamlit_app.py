@@ -305,7 +305,10 @@ with st.sidebar:
         
     if st.button("⚡ EIA Generation", use_container_width=True):
         st.switch_page("pages/3_EIA_Generation.py")
-        
+
+    if st.button("🔥 Power Burns", use_container_width=True):
+        st.switch_page("pages/4_Power_Burns.py")
+
     if st.button("📈 Net Changes", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
     
@@ -345,7 +348,7 @@ Click any button to switch to that page's specialized functionality.
 
 # Quick access buttons in main area too
 st.subheader("🚀 Quick Access")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4,col5 = st.columns(5)
 
 with col1:
     if st.button("📊 Go to Historical OI Analysis", use_container_width=True):
@@ -362,10 +365,16 @@ with col3:
         st.switch_page("pages/3_EIA_Generation.py")
     st.write("Explore hourly electricity generation by source and region")
 
-with col4:
+with col4:  # or replace col4
+    if st.button("🔥 Go to Power Burns Analysis", use_container_width=True):
+        st.switch_page("pages/4_Power_Burns.py")
+    st.write("Analyze natural gas power consumption forecasts")
+
+with col5:
     if st.button("📈 Go to Net Changes Analysis", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
     st.write("Analyze day-over-day changes across all regions")
+
 
 st.markdown("---")
 col1, col2 = st.columns([2, 1])
