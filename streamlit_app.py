@@ -312,6 +312,9 @@ with st.sidebar:
     if st.button("📈 Net Changes", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
     
+    if st.button("📊 Tape Analysis", use_container_width=True):
+        st.switch_page("pages/6_Tape_Analysis.py")
+    
     st.markdown("---")
     
     # Current page indicator
@@ -348,7 +351,7 @@ Click any button to switch to that page's specialized functionality.
 
 # Quick access buttons in main area too
 st.subheader("🚀 Quick Access")
-col1, col2, col3, col4,col5 = st.columns(5)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     if st.button("📊 Go to Historical OI Analysis", use_container_width=True):
@@ -365,7 +368,7 @@ with col3:
         st.switch_page("pages/3_EIA_Generation.py")
     st.write("Explore hourly electricity generation by source and region")
 
-with col4:  # or replace col4
+with col4:
     if st.button("🔥 Go to Power Burns Analysis", use_container_width=True):
         st.switch_page("pages/4_Power_Burns.py")
     st.write("Analyze natural gas power consumption forecasts")
@@ -374,7 +377,6 @@ with col5:
     if st.button("📈 Go to Net Changes Analysis", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
     st.write("Analyze day-over-day changes across all regions")
-
 
 st.markdown("---")
 col1, col2 = st.columns([2, 1])
@@ -392,8 +394,12 @@ with col1:
     - **🔮 Future Contracts** - Active contract comparisons and arbitrage analysis
     
     **⚡ Electricity Generation Analysis:**
-    - **⚡ Texas Generation** - Hourly electricity generation by source and region
-    - **📈 Load Demand Analysis** - Power consumption patterns and trends
+    - **⚡ EIA Generation** - Hourly electricity generation by source and region
+    - **🔥 Power Burns** - Natural gas consumption for power generation analysis
+    - **📈 Net Changes** - Day-over-day forecast changes across all regions
+    
+    **📊 Market Microstructure:**
+    - **📊 Tape Analysis** - High-frequency trading data analysis
     
     ### 🚀 Getting Started:
     1. **Click on a page** in the sidebar navigation above ⬆️
@@ -411,6 +417,8 @@ with col2:
     ✅ Interactive time-series visualizations  
     ✅ Cross-year contract comparisons  
     ✅ Generation source breakdowns  
+    ✅ Forecast comparison analysis  
+    ✅ High-frequency tape analysis  
     ✅ Export capabilities  
     ✅ Time-to-expiry analysis  
     """)
