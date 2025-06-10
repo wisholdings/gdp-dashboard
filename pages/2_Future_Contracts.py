@@ -187,15 +187,15 @@ with st.sidebar:
         
     if st.button("⚡ EIA Generation", use_container_width=True):
         st.switch_page("pages/3_EIA_Generation.py")
-        
+    if st.button("🔥 Power Burns", use_container_width=True):
+        st.switch_page("pages/4_Power_Burns.py")        
     if st.button("📈 Net Changes", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
         
     if st.button("📊 Tape Analysis", use_container_width=True):
         st.switch_page("pages/6_Tape_Analysis.py")
         
-    if st.button("🔥 Power Burns", use_container_width=True):
-        st.switch_page("pages/4_Power_Burns.py")
+
     
     st.markdown("---")
     st.info("📍 **Current Page:** Future Contracts")
