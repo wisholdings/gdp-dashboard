@@ -192,7 +192,7 @@ def calculate_yearly_stats(df):
     return yearly_stats.reset_index()
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Power Burns Analysis", page_icon="🔥", layout="wide")
+
 
 # --- PAGE CONTENT ---
 st.title("🔥 Natural Gas Power Burns Analysis")
