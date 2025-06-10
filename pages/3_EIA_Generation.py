@@ -41,21 +41,29 @@ def get_db_engine():
 
 @st.cache_data(ttl=3600)
 def get_generation_data(table_name: str, start_date=None, end_date=None):
-    """Fetch generation data from the specified table"""
+    """Fetch generation data from the specified table - ONLY TODAY'S PUBLISHED DATA"""
     engine = get_db_engine()
     df = pd.DataFrame()
     
     try:
-        # Base query
-        query = f"SELECT * FROM `{table_name}` ORDER BY timestamp ASC"
+        # Get today's date
+        today = date.today()
         
-        # Add date filtering if provided
+        # Base query - ALWAYS filter by today's date_published
+        base_query = f"""
+            SELECT * FROM `{table_name}` 
+            WHERE DATE(date_published) = '{today}'
+        """
+        
+        # Add timestamp filtering if provided (but keep date_published filter)
         if start_date and end_date:
             query = f"""
-                SELECT * FROM `{table_name}` 
-                WHERE DATE(timestamp) BETWEEN '{start_date}' AND '{end_date}'
+                {base_query}
+                AND DATE(timestamp) BETWEEN '{start_date}' AND '{end_date}'
                 ORDER BY timestamp ASC
             """
+        else:
+            query = f"{base_query} ORDER BY timestamp ASC"
         
         df = pd.read_sql_query(query, engine)
         
@@ -66,12 +74,34 @@ def get_generation_data(table_name: str, start_date=None, end_date=None):
             numeric_columns = [col for col in df.columns if col not in ['timestamp', 'date_published']]
             for col in numeric_columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+        else:
+            # If no data for today, show a warning
+            st.warning(f"⚠️ No data found for today's date_published ({today}) in table '{table_name}'. This might mean today's forecast hasn't been uploaded yet.")
                 
         return df
         
     except Exception as e:
         st.error(f"Error fetching data from table '{table_name}': {e}")
         return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_available_date_published_dates(table_name: str):
+    """Get all available date_published dates for a table"""
+    engine = get_db_engine()
+    try:
+        query = f"""
+            SELECT DISTINCT DATE(date_published) as pub_date 
+            FROM `{table_name}` 
+            ORDER BY pub_date DESC 
+            LIMIT 10
+        """
+        df = pd.read_sql_query(query, engine)
+        if not df.empty:
+            return [pd.to_datetime(date).date() for date in df['pub_date']]
+        return []
+    except Exception as e:
+        st.error(f"Error getting available dates for '{table_name}': {e}")
+        return []
 
 def get_generation_tables():
     """Get all hourly generation tables"""
@@ -96,10 +126,15 @@ st.set_page_config(page_title="Texas Generation", page_icon="⚡", layout="wide"
 st.title("⚡ EIA Generation Analysis")
 st.markdown("---")
 
-st.markdown("""
+# Get today's date for display
+today = date.today()
+
+st.markdown(f"""
 **Analyze hourly electricity generation data by source for all regions.**
 
-This page provides detailed analysis of electricity generation patterns including load demand, 
+**📅 Data Filter:** This page shows **ONLY today's forecast data** (date_published = {today})
+
+This ensures you're viewing the most recent published forecast data including load demand, 
 natural gas, wind, solar, coal, nuclear, hydro, and other sources across multiple regions.
 """)
 
@@ -141,6 +176,10 @@ with st.sidebar:
     st.markdown("---")
     st.info("📍 **Current Page:** EIA Generation")
     
+    # Show today's date prominently
+    st.success(f"📅 **Data Filter:** {today}")
+    st.caption("Only showing today's published forecast data")
+    
     st.subheader("📊 Analysis Controls")
     
     # Table selection
@@ -151,68 +190,104 @@ with st.sidebar:
         help="Choose a region to analyze"
     )
     
-    # Date range selection
-    st.subheader("📅 Date Range")
+    # Show available dates for this table
+    if selected_table:
+        available_dates = get_available_date_published_dates(selected_table)
+        if available_dates:
+            st.write("**Available forecast dates:**")
+            for avail_date in available_dates[:5]:  # Show last 5 dates
+                if avail_date == today:
+                    st.write(f"✅ {avail_date} (Today)")
+                else:
+                    st.write(f"📅 {avail_date}")
+        else:
+            st.warning("No data available for this table")
     
-    # Get min/max dates for the selected table
-    sample_data = get_generation_data(selected_table)
-    if not sample_data.empty:
-        min_date = sample_data['timestamp'].min().date()
-        max_date = sample_data['timestamp'].max().date()
-        
-        st.write(f"Available: {min_date} to {max_date}")
-        
-        # FIXED: Default to 4 days before today (instead of last 7 days)
-        today = datetime.now().date()
-        default_start = max(min_date, today - timedelta(days=4))
-        
-        start_date = st.date_input(
-            "Start Date",
-            value=default_start,
-            min_value=min_date,
-            max_value=max_date
-        )
-        
-        end_date = st.date_input(
-            "End Date", 
-            value=max_date,
-            min_value=min_date,
-            max_value=max_date
-        )
-        
-        if start_date > end_date:
-            st.error("Start date must be before end date")
-            st.stop()
-    else:
-        st.error("No data available for selected table")
-        st.stop()
+    # Date range selection for timestamp filtering
+    st.subheader("📅 Time Range Filter")
+    st.caption("Filter the forecast data by timestamp (forecast periods)")
+    
+    # Get sample data to determine available timestamp range
+    if selected_table:
+        sample_data = get_generation_data(selected_table)
+        if not sample_data.empty:
+            min_date = sample_data['timestamp'].min().date()
+            max_date = sample_data['timestamp'].max().date()
+            
+            st.write(f"Forecast period: {min_date} to {max_date}")
+            
+            # Default to show next 3 days of forecast
+            default_start = min_date
+            default_end = min(max_date, min_date + timedelta(days=3))
+            
+            start_date = st.date_input(
+                "Start Date (Forecast)",
+                value=default_start,
+                min_value=min_date,
+                max_value=max_date,
+                help="Start of forecast period to display"
+            )
+            
+            end_date = st.date_input(
+                "End Date (Forecast)", 
+                value=default_end,
+                min_value=min_date,
+                max_value=max_date,
+                help="End of forecast period to display"
+            )
+            
+            if start_date > end_date:
+                st.error("Start date must be before end date")
+                st.stop()
+        else:
+            st.error(f"No data available for today ({today}) in selected table")
+            start_date = today
+            end_date = today
     
     # Chart options
     st.subheader("📈 Chart Options")
     show_load = st.checkbox("Show Load Demand", value=True)
     show_generation = st.checkbox("Show Generation Sources", value=True)
     stack_chart = st.checkbox("Stack Generation Sources", value=False)
+
 # Main content area
 if selected_table:
     region_name = parse_table_name(selected_table)
-    st.subheader(f"📈 {region_name} Generation Data")
+    st.subheader(f"📈 {region_name} Generation Data - {today} Forecast")
     
-    # Load data for selected date range
+    # Load data for selected date range (with today's date_published filter)
     df = get_generation_data(selected_table, start_date, end_date)
     
     if df.empty:
-        st.warning(f"No data found for {region_name} in the selected date range.")
+        st.warning(f"No forecast data found for {region_name} published on {today} for the selected time range.")
+        
+        # Show what dates are available
+        available_dates = get_available_date_published_dates(selected_table)
+        if available_dates:
+            st.info(f"💡 Available forecast dates for {region_name}: {', '.join([str(d) for d in available_dates[:5]])}")
+        else:
+            st.error(f"No forecast data found at all for {region_name}")
     else:
         # Display data info
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Data Points", f"{len(df):,}")
         with col2:
-            st.metric("Date Range", f"{(end_date - start_date).days} days")
+            st.metric("Forecast Days", f"{(end_date - start_date).days + 1}")
         with col3:
             if 'timestamp' in df.columns:
                 hours_span = (df['timestamp'].max() - df['timestamp'].min()).total_seconds() / 3600
                 st.metric("Hours Span", f"{hours_span:.0f}")
+        with col4:
+            # Show the date_published for verification
+            if 'date_published' in df.columns:
+                pub_date = pd.to_datetime(df['date_published']).iloc[0].date()
+                st.metric("Published", str(pub_date))
+        
+        # Show forecast info
+        forecast_start = df['timestamp'].min().strftime('%Y-%m-%d %H:%M')
+        forecast_end = df['timestamp'].max().strftime('%Y-%m-%d %H:%M')
+        st.info(f"📊 Showing forecast from {forecast_start} to {forecast_end} (published on {today})")
         
         # Identify columns
         load_col = [col for col in df.columns if 'LOAD' in col.upper()]
@@ -304,7 +379,7 @@ if selected_table:
                         hovertemplate="Time: %{x}<br>Load: %{y:,.0f} MW<extra></extra>"
                     )
                 )
-            fig.update_layout(title=f"{region_name} Load Demand")
+            fig.update_layout(title=f"{region_name} Load Demand - {today} Forecast")
             
         elif show_generation:
             # Generation only
@@ -325,7 +400,7 @@ if selected_table:
                         hovertemplate=f"{source_name}: %{{y:,.0f}} MW<extra></extra>"
                     )
                 )
-            fig.update_layout(title=f"{region_name} Generation by Source")
+            fig.update_layout(title=f"{region_name} Generation by Source - {today} Forecast")
         
         # Update layout
         fig.update_layout(
@@ -373,16 +448,19 @@ if selected_table:
         
         # Raw data sample
         with st.expander("📋 Raw Data Sample"):
-            st.dataframe(df.head(24), use_container_width=True)  # Show first 24 hours
+            # Show timestamp, date_published, and a few key columns
+            display_cols = ['timestamp', 'date_published'] + load_col + generation_cols[:3]
+            display_cols = [col for col in display_cols if col in df.columns]
+            st.dataframe(df[display_cols].head(24), use_container_width=True)  # Show first 24 hours
             
             if st.button("📥 Download Full Dataset"):
                 csv = df.to_csv(index=False)
                 st.download_button(
                     label="Download CSV",
                     data=csv,
-                    file_name=f"{region_name}_generation_{start_date}_{end_date}.csv",
+                    file_name=f"{region_name}_generation_forecast_{today}_{start_date}_{end_date}.csv",
                     mime="text/csv"
                 )
 
 st.markdown("---")
-st.markdown("**💾 Data Source:** EIA via automated ingestion script | **🔄 Data Updates:** Every hour")
+st.markdown(f"**💾 Data Source:** EIA via automated ingestion script | **🔄 Data Updates:** Every hour | **📅 Current Filter:** {today} forecast data only")
