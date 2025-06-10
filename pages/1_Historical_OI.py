@@ -195,8 +195,7 @@ with st.sidebar:
     if st.button("📊 Tape Analysis", use_container_width=True):
         st.switch_page("pages/6_Tape_Analysis.py")
         
-    if st.button("🔥 Power Burns", use_container_width=True):
-        st.switch_page("pages/4_Power_Burns.py")
+
     
     st.markdown("---")
     st.info("📍 **Current Page:** Historical OI")
