@@ -53,16 +53,41 @@ def get_generation_tables():
     return sorted(generation_tables)
 
 @st.cache_data(ttl=3600)
-def get_aggregated_generation_data(start_date=None, end_date=None):
-    """Fetch and aggregate generation data from all regions - ONLY TODAY'S PUBLISHED DATA"""
+def get_available_forecast_dates():
+    """Get available date_published dates across all tables"""
+    engine = get_db_engine()
+    generation_tables = get_generation_tables()
+    
+    if not generation_tables:
+        return []
+    
+    all_dates = set()
+    
+    for table in generation_tables:
+        try:
+            query = f"""
+                SELECT DISTINCT DATE(date_published) as pub_date 
+                FROM `{table}` 
+                ORDER BY pub_date DESC 
+                LIMIT 10
+            """
+            result = pd.read_sql_query(query, engine)
+            if not result.empty:
+                dates = [pd.to_datetime(d).date() for d in result['pub_date']]
+                all_dates.update(dates)
+        except Exception:
+            continue
+    
+    return sorted(list(all_dates), reverse=True)
+
+@st.cache_data(ttl=3600)
+def get_aggregated_generation_data_for_date(pub_date, start_timestamp=None, end_timestamp=None):
+    """Fetch and aggregate generation data from all regions for a specific publication date"""
     engine = get_db_engine()
     generation_tables = get_generation_tables()
     
     if not generation_tables:
         return pd.DataFrame()
-    
-    # Get today's date for filtering
-    today = date.today()
     
     all_data = []
     
@@ -71,17 +96,17 @@ def get_aggregated_generation_data(start_date=None, end_date=None):
             # Get region name from table
             region = table.replace('_hourly_generation', '').upper()
             
-            # FIXED: Build query with date_published filter AND timestamp filtering if provided
+            # Build query for specific publication date
             base_query = f"""
                 SELECT *
                 FROM `{table}` 
-                WHERE DATE(date_published) = '{today}'
+                WHERE DATE(date_published) = '{pub_date}'
             """
             
-            if start_date and end_date:
+            if start_timestamp and end_timestamp:
                 query = f"""
                     {base_query}
-                    AND DATE(timestamp) BETWEEN '{start_date}' AND '{end_date}'
+                    AND DATE(timestamp) BETWEEN '{start_timestamp}' AND '{end_timestamp}'
                     ORDER BY timestamp ASC
                 """
             else:
@@ -117,7 +142,7 @@ def get_aggregated_generation_data(start_date=None, end_date=None):
                 all_data.append(standardized_df)
                 
         except Exception as e:
-            st.warning(f"Error processing table {table}: {e}")
+            # st.warning(f"Error processing table {table} for {pub_date}: {e}")
             continue
     
     if not all_data:
@@ -138,85 +163,99 @@ def get_aggregated_generation_data(start_date=None, end_date=None):
     
     return aggregated_df
 
-def calculate_day_over_day_changes(df):
-    """Calculate day-over-day changes for daily aggregated data"""
-    if df.empty:
+def find_common_timestamps(df1, df2):
+    """Find common timestamps between two dataframes"""
+    if df1.empty or df2.empty:
+        return []
+    
+    timestamps1 = set(df1['timestamp'].dt.floor('H'))  # Round to hour for comparison
+    timestamps2 = set(df2['timestamp'].dt.floor('H'))
+    
+    common_timestamps = timestamps1.intersection(timestamps2)
+    return sorted(list(common_timestamps))
+
+def calculate_forecast_changes(df_new, df_old, common_timestamps):
+    """Calculate changes between two forecast datasets for common timestamps"""
+    if df_new.empty or df_old.empty or not common_timestamps:
         return pd.DataFrame()
     
-    # Convert to daily averages first
-    df['date'] = df['timestamp'].dt.date
-    numeric_cols = [col for col in df.columns if col.endswith('_MW')]
+    # Filter both dataframes to common timestamps (rounded to hour)
+    df_new_filtered = df_new[df_new['timestamp'].dt.floor('H').isin(common_timestamps)].copy()
+    df_old_filtered = df_old[df_old['timestamp'].dt.floor('H').isin(common_timestamps)].copy()
     
-    daily_df = df.groupby('date')[numeric_cols].mean().reset_index()
+    # Round timestamps for matching
+    df_new_filtered['timestamp_hour'] = df_new_filtered['timestamp'].dt.floor('H')
+    df_old_filtered['timestamp_hour'] = df_old_filtered['timestamp'].dt.floor('H')
     
-    # Calculate day-over-day changes
-    changes_df = daily_df.copy()
+    # Merge on rounded timestamp
+    merged = pd.merge(
+        df_new_filtered, 
+        df_old_filtered, 
+        on='timestamp_hour', 
+        suffixes=('_new', '_old')
+    )
+    
+    if merged.empty:
+        return pd.DataFrame()
+    
+    # Calculate changes for each generation type
+    numeric_cols = [col for col in df_new.columns if col.endswith('_MW')]
+    changes_df = merged[['timestamp_hour']].copy()
+    changes_df.rename(columns={'timestamp_hour': 'timestamp'}, inplace=True)
     
     for col in numeric_cols:
-        # Calculate absolute change
-        changes_df[f"{col}_change"] = daily_df[col].diff()
-        # Calculate percentage change
-        changes_df[f"{col}_pct_change"] = daily_df[col].pct_change() * 100
+        if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
+            # Absolute change
+            changes_df[f"{col}_change"] = merged[f"{col}_new"] - merged[f"{col}_old"]
+            # Percentage change
+            changes_df[f"{col}_pct_change"] = (
+                (merged[f"{col}_new"] - merged[f"{col}_old"]) / 
+                (merged[f"{col}_old"].replace(0, np.nan)) * 100
+            )
+            # Store both values for reference
+            changes_df[f"{col}_new"] = merged[f"{col}_new"]
+            changes_df[f"{col}_old"] = merged[f"{col}_old"]
     
     return changes_df
 
-@st.cache_data(ttl=3600)
-def get_data_date_range():
-    """Get the available timestamp date range for today's published data"""
-    engine = get_db_engine()
-    generation_tables = get_generation_tables()
+def calculate_daily_forecast_changes(changes_df):
+    """Calculate daily aggregated forecast changes"""
+    if changes_df.empty:
+        return pd.DataFrame()
     
-    if not generation_tables:
-        return None, None
+    changes_df['date'] = pd.to_datetime(changes_df['timestamp']).dt.date
     
-    today = date.today()
-    min_dates = []
-    max_dates = []
+    # Get change columns
+    change_cols = [col for col in changes_df.columns if col.endswith('_change')]
+    pct_change_cols = [col for col in changes_df.columns if col.endswith('_pct_change')]
     
-    for table in generation_tables:
-        try:
-            # FIXED: Only check timestamp range for today's published data
-            query = f"""
-                SELECT MIN(timestamp) as min_date, MAX(timestamp) as max_date 
-                FROM `{table}` 
-                WHERE DATE(date_published) = '{today}'
-            """
-            result = pd.read_sql_query(query, engine)
-            if not result.empty and result['min_date'].iloc[0] is not None:
-                min_dates.append(pd.to_datetime(result['min_date'].iloc[0]))
-                max_dates.append(pd.to_datetime(result['max_date'].iloc[0]))
-        except Exception:
-            continue
+    # Aggregate by date
+    daily_changes = changes_df.groupby('date').agg({
+        **{col: 'mean' for col in change_cols},
+        **{col: 'mean' for col in pct_change_cols}
+    }).reset_index()
     
-    if min_dates and max_dates:
-        return min(min_dates).date(), max(max_dates).date()
-    
-    return None, None
+    return daily_changes
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Net Changes", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Forecast Changes", page_icon="📈", layout="wide")
 
 # --- PAGE CONTENT ---
-st.title("📈 Net Changes Analysis")
+st.title("📈 Forecast vs Forecast Analysis")
 st.markdown("---")
 
-# Get today's date for display
-today = date.today()
+st.markdown("""
+**Analyze how electricity generation forecasts change between publication dates.**
 
-st.markdown(f"""
-**Analyze day-over-day changes in total electricity generation across all regions.**
-
-**📅 Data Filter:** This page shows **ONLY today's forecast data** (date_published = {today})
-
-This page aggregates hourly generation data from all available regions (California, Texas, Florida, etc.) 
-and compares forecast changes day-over-day for each generation source.
+This page compares today's forecast against yesterday's (and up to 3 days back) to show how predictions 
+for the same time periods evolve as new data becomes available.
 """)
 
 # Sidebar controls
 with st.sidebar:
     st.title("🧭 Navigation")
     
-    # FIXED: Navigation buttons - removed Power Burns reference
+    # Navigation buttons
     if st.button("🏠 Home", use_container_width=True):
         st.switch_page("streamlit_app.py")
     
@@ -233,64 +272,73 @@ with st.sidebar:
         st.switch_page("pages/6_Tape_Analysis.py")
     
     st.markdown("---")
-    st.info("📍 **Current Page:** Net Changes")
-    
-    # Show today's date prominently
-    st.success(f"📅 **Data Filter:** {today}")
-    st.caption("Only showing today's published forecast data")
+    st.info("📍 **Current Page:** Forecast Changes")
     
     st.subheader("📊 Analysis Controls")
     
-    # Get available date range
-    min_date, max_date = get_data_date_range()
+    # Get available forecast dates
+    available_dates = get_available_forecast_dates()
     
-    if min_date and max_date:
-        st.write(f"**Available Forecast Period:** {min_date} to {max_date}")
-        
-        # Analysis type selection
-        analysis_type = st.selectbox(
-            "Analysis Type:",
-            ["Day-over-Day Changes", "Cumulative Trends", "Generation Mix Evolution"],
-            help="Choose the type of analysis to perform"
-        )
-        
-        # Date range selection for forecast periods
-        st.subheader("📅 Forecast Period Filter")
-        st.caption("Filter which forecast periods to analyze")
-        
-        # Default to next 7 days of forecast
-        default_start = min_date
-        default_end = min(max_date, min_date + timedelta(days=7))
-        
-        start_date = st.date_input(
-            "Start Date",
-            value=default_start,
-            min_value=min_date,
-            max_value=max_date
-        )
-        
-        end_date = st.date_input(
-            "End Date", 
-            value=default_end,
-            min_value=min_date,
-            max_value=max_date
-        )
-        
-        if start_date > end_date:
-            st.error("Start date must be before end date")
-            st.stop()
-        
-        # Chart options
-        st.subheader("📈 Chart Options")
-        show_percentage = st.checkbox("Show Percentage Changes", value=True)
-        show_absolute = st.checkbox("Show Absolute Changes", value=False)
-        filter_small_changes = st.checkbox("Filter Small Changes", value=True)
-        if filter_small_changes:
-            min_change_threshold = st.slider("Minimum Change (MW):", 10, 1000, 100)
-    else:
-        st.error(f"Unable to determine forecast date range for today's data ({today})")
-        st.warning("This might mean today's forecast data hasn't been uploaded yet.")
+    if not available_dates:
+        st.error("No forecast dates found")
         st.stop()
+    
+    st.write("**Available Forecast Dates:**")
+    for i, avail_date in enumerate(available_dates[:5]):
+        if i == 0:
+            st.write(f"📅 {avail_date} (Latest)")
+        else:
+            st.write(f"📅 {avail_date}")
+    
+    # Date selection for comparison
+    st.subheader("🔄 Forecast Comparison")
+    
+    # Default to comparing latest vs previous
+    if len(available_dates) >= 2:
+        default_new = available_dates[0]  # Latest
+        default_old = available_dates[1]  # Previous
+    else:
+        default_new = available_dates[0] if available_dates else date.today()
+        default_old = default_new
+    
+    new_forecast_date = st.selectbox(
+        "📈 Newer Forecast:",
+        options=available_dates,
+        index=0,
+        help="The more recent forecast to compare"
+    )
+    
+    # Filter old forecast options to only dates before the new one
+    old_forecast_options = [d for d in available_dates if d < new_forecast_date]
+    
+    if not old_forecast_options:
+        st.error(f"No older forecasts available before {new_forecast_date}")
+        st.stop()
+    
+    old_forecast_date = st.selectbox(
+        "📉 Older Forecast:",
+        options=old_forecast_options,
+        index=0,
+        help="The older forecast to compare against"
+    )
+    
+    days_diff = (new_forecast_date - old_forecast_date).days
+    st.info(f"📊 Comparing forecasts {days_diff} day(s) apart")
+    
+    # Analysis type
+    analysis_type = st.selectbox(
+        "Analysis Type:",
+        ["Hourly Changes", "Daily Changes", "Generation Mix Changes"],
+        help="Choose how to analyze the forecast differences"
+    )
+    
+    # Chart options
+    st.subheader("📈 Chart Options")
+    show_percentage = st.checkbox("Show Percentage Changes", value=True)
+    show_absolute = st.checkbox("Show Absolute Changes", value=False)
+    filter_small_changes = st.checkbox("Filter Small Changes", value=True)
+    if filter_small_changes:
+        min_change_threshold = st.slider("Minimum Change (MW):", 10, 500, 50)
 
 # Establish DB connection
 engine = get_db_engine()
@@ -298,239 +346,220 @@ if not engine:
     st.stop()
 
 # Main content area
-if min_date and max_date:
+st.subheader(f"📊 Forecast Comparison: {new_forecast_date} vs {old_forecast_date}")
+
+# Load data for both forecast dates
+with st.spinner("Loading forecast data for comparison..."):
+    df_new = get_aggregated_generation_data_for_date(new_forecast_date)
+    df_old = get_aggregated_generation_data_for_date(old_forecast_date)
+
+if df_new.empty and df_old.empty:
+    st.error("No data found for either forecast date")
+elif df_new.empty:
+    st.error(f"No data found for newer forecast ({new_forecast_date})")
+elif df_old.empty:
+    st.error(f"No data found for older forecast ({old_forecast_date})")
+else:
+    # Find common timestamps
+    common_timestamps = find_common_timestamps(df_new, df_old)
     
-    # Load and process data
-    with st.spinner(f"Loading and aggregating today's forecast data ({today}) from all regions..."):
-        df = get_aggregated_generation_data(start_date, end_date)
-    
-    if df.empty:
-        st.warning(f"No forecast data found for {today} in the selected forecast period ({start_date} to {end_date}).")
-        st.info("💡 This might mean today's forecast data hasn't been uploaded yet, or the selected forecast period has no data.")
+    if not common_timestamps:
+        st.error("No overlapping forecast periods found between the two dates")
     else:
-        # Show available regions and generation types
-        generation_tables = get_generation_tables()
-        regions = [t.replace('_hourly_generation', '').replace('_', ' ').title() for t in generation_tables]
-        generation_types = [col.replace('_MW', '') for col in df.columns if col.endswith('_MW')]
+        # Calculate forecast changes
+        changes_df = calculate_forecast_changes(df_new, df_old, common_timestamps)
         
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Regions Aggregated", len(regions))
-        with col2:
-            st.metric("Generation Types", len(generation_types))
-        with col3:
-            st.metric("Data Points", f"{len(df):,}")
-        with col4:
-            st.metric("Published", str(today))
-        
-        st.info(f"**Regions:** {', '.join(regions)}")
-        st.info(f"**Generation Types:** {', '.join(generation_types)}")
-        st.info(f"**Forecast Period:** {start_date} to {end_date} (published on {today})")
-        
-        if analysis_type == "Day-over-Day Changes":
-            st.subheader("📊 Day-over-Day Generation Changes (Forecast)")
+        if changes_df.empty:
+            st.error("Unable to calculate forecast changes")
+        else:
+            # Show data summary
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Common Hours", f"{len(changes_df):,}")
+            with col2:
+                forecast_start = changes_df['timestamp'].min().strftime('%Y-%m-%d')
+                forecast_end = changes_df['timestamp'].max().strftime('%Y-%m-%d')
+                st.metric("Forecast Period", f"{forecast_start} to {forecast_end}")
+            with col3:
+                st.metric("Newer Forecast", str(new_forecast_date))
+            with col4:
+                st.metric("Older Forecast", str(old_forecast_date))
             
-            # Calculate day-over-day changes
-            changes_df = calculate_day_over_day_changes(df)
+            # Get generation types
+            generation_types = [col.replace('_MW_change', '') for col in changes_df.columns if col.endswith('_MW_change')]
+            st.info(f"**Generation Types:** {', '.join(generation_types)}")
             
-            if changes_df.empty:
-                st.warning("Unable to calculate day-over-day changes.")
-            else:
-                # Filter out the first row (no previous day to compare)
-                changes_df = changes_df.iloc[1:].copy()
+            if analysis_type == "Hourly Changes":
+                st.subheader("⏰ Hourly Forecast Changes")
                 
-                if changes_df.empty:
-                    st.warning("Not enough data to calculate day-over-day changes. Need at least 2 days of forecast data.")
-                else:
-                    # Get change columns
-                    change_cols = [col for col in changes_df.columns if col.endswith('_change')]
-                    pct_change_cols = [col for col in changes_df.columns if col.endswith('_pct_change')]
+                change_cols = [col for col in changes_df.columns if col.endswith('_change')]
+                pct_change_cols = [col for col in changes_df.columns if col.endswith('_pct_change')]
+                
+                if show_percentage and pct_change_cols:
+                    fig = go.Figure()
+                    colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
                     
-                    # Create visualization
+                    for i, col in enumerate(pct_change_cols):
+                        gen_type = col.replace('_MW_pct_change', '')
+                        
+                        # Filter small changes if requested
+                        plot_data = changes_df.copy()
+                        if filter_small_changes:
+                            abs_change_col = f"{gen_type}_MW_change"
+                            if abs_change_col in changes_df.columns:
+                                plot_data = plot_data[abs(plot_data[abs_change_col]) >= min_change_threshold]
+                        
+                        if not plot_data.empty:
+                            fig.add_trace(go.Scatter(
+                                x=plot_data['timestamp'],
+                                y=plot_data[col],
+                                mode='lines+markers',
+                                name=gen_type,
+                                line=dict(color=colors[i % len(colors)], width=2),
+                                hovertemplate=f"{gen_type}<br>Time: %{{x}}<br>Change: %{{y:.2f}}%<extra></extra>"
+                            ))
+                    
+                    fig.update_layout(
+                        title=f"Hourly Forecast Changes: {new_forecast_date} vs {old_forecast_date} (%)",
+                        xaxis_title="Forecast Time",
+                        yaxis_title="Percentage Change (%)",
+                        hovermode='x unified',
+                        height=500
+                    )
+                    
+                    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                if show_absolute and change_cols:
+                    fig2 = go.Figure()
+                    colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
+                    
+                    for i, col in enumerate(change_cols):
+                        gen_type = col.replace('_MW_change', '')
+                        
+                        plot_data = changes_df.copy()
+                        if filter_small_changes:
+                            plot_data = plot_data[abs(plot_data[col]) >= min_change_threshold]
+                        
+                        if not plot_data.empty:
+                            fig2.add_trace(go.Scatter(
+                                x=plot_data['timestamp'],
+                                y=plot_data[col],
+                                mode='lines+markers',
+                                name=gen_type,
+                                line=dict(color=colors[i % len(colors)], width=2),
+                                hovertemplate=f"{gen_type}<br>Time: %{{x}}<br>Change: %{{y:,.0f}} MW<extra></extra>"
+                            ))
+                    
+                    fig2.update_layout(
+                        title=f"Hourly Forecast Changes: {new_forecast_date} vs {old_forecast_date} (MW)",
+                        xaxis_title="Forecast Time",
+                        yaxis_title="Change (MW)",
+                        hovermode='x unified',
+                        height=500
+                    )
+                    
+                    fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                    st.plotly_chart(fig2, use_container_width=True)
+            
+            elif analysis_type == "Daily Changes":
+                st.subheader("📅 Daily Aggregated Forecast Changes")
+                
+                daily_changes = calculate_daily_forecast_changes(changes_df)
+                
+                if not daily_changes.empty:
+                    change_cols = [col for col in daily_changes.columns if col.endswith('_change')]
+                    pct_change_cols = [col for col in daily_changes.columns if col.endswith('_pct_change')]
+                    
                     if show_percentage and pct_change_cols:
                         fig = go.Figure()
-                        
                         colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
                         
                         for i, col in enumerate(pct_change_cols):
                             gen_type = col.replace('_MW_pct_change', '')
                             
-                            # Filter small changes if requested
-                            plot_data = changes_df.copy()
-                            if filter_small_changes:
-                                abs_change_col = f"{gen_type}_MW_change"
-                                if abs_change_col in changes_df.columns:
-                                    plot_data = plot_data[abs(plot_data[abs_change_col]) >= min_change_threshold]
-                            
-                            if not plot_data.empty:
-                                fig.add_trace(go.Scatter(
-                                    x=plot_data['date'],
-                                    y=plot_data[col],
-                                    mode='lines+markers',
-                                    name=gen_type,
-                                    line=dict(color=colors[i % len(colors)], width=2),
-                                    hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Change: %{{y:.2f}}%<extra></extra>"
-                                ))
+                            fig.add_trace(go.Bar(
+                                x=daily_changes['date'],
+                                y=daily_changes[col],
+                                name=gen_type,
+                                marker_color=colors[i % len(colors)],
+                                hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Avg Change: %{{y:.2f}}%<extra></extra>"
+                            ))
                         
                         fig.update_layout(
-                            title=f"Day-over-Day Percentage Changes in Generation by Source - {today} Forecast",
+                            title=f"Daily Average Forecast Changes: {new_forecast_date} vs {old_forecast_date} (%)",
                             xaxis_title="Forecast Date",
-                            yaxis_title="Percentage Change (%)",
-                            hovermode='x unified',
+                            yaxis_title="Average Daily Change (%)",
                             height=500
                         )
                         
-                        # Add horizontal line at 0
                         fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-                        
                         st.plotly_chart(fig, use_container_width=True)
-                    
-                    if show_absolute and change_cols:
-                        fig2 = go.Figure()
-                        
-                        colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
-                        
-                        for i, col in enumerate(change_cols):
-                            gen_type = col.replace('_MW_change', '')
-                            
-                            # Filter small changes if requested
-                            plot_data = changes_df.copy()
-                            if filter_small_changes:
-                                plot_data = plot_data[abs(plot_data[col]) >= min_change_threshold]
-                            
-                            if not plot_data.empty:
-                                fig2.add_trace(go.Scatter(
-                                    x=plot_data['date'],
-                                    y=plot_data[col],
-                                    mode='lines+markers',
-                                    name=gen_type,
-                                    line=dict(color=colors[i % len(colors)], width=2),
-                                    hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Change: %{{y:,.0f}} MW<extra></extra>"
-                                ))
-                        
-                        fig2.update_layout(
-                            title=f"Day-over-Day Absolute Changes in Generation by Source - {today} Forecast",
-                            xaxis_title="Forecast Date",
-                            yaxis_title="Change (MW)",
-                            hovermode='x unified',
-                            height=500
-                        )
-                        
-                        # Add horizontal line at 0
-                        fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-                        
-                        st.plotly_chart(fig2, use_container_width=True)
-                    
-                    # Summary statistics
-                    st.subheader("📊 Change Statistics Summary")
-                    
-                    if pct_change_cols:
-                        stats_data = []
-                        
-                        for col in pct_change_cols:
-                            gen_type = col.replace('_MW_pct_change', '')
-                            valid_data = changes_df[col].dropna()
-                            
-                            if not valid_data.empty:
-                                stats_data.append({
-                                    'Generation Type': gen_type,
-                                    'Avg Daily Change (%)': f"{valid_data.mean():.2f}%",
-                                    'Max Increase (%)': f"{valid_data.max():.2f}%",
-                                    'Max Decrease (%)': f"{valid_data.min():.2f}%",
-                                    'Volatility (Std Dev)': f"{valid_data.std():.2f}%",
-                                    'Days with Data': len(valid_data)
-                                })
-                        
-                        if stats_data:
-                            stats_df = pd.DataFrame(stats_data)
-                            st.dataframe(stats_df, use_container_width=True)
-        
-        elif analysis_type == "Cumulative Trends":
-            st.subheader("📈 Cumulative Generation Trends (Forecast)")
             
-            # Convert to daily averages
-            df['date'] = df['timestamp'].dt.date
-            numeric_cols = [col for col in df.columns if col.endswith('_MW')]
-            daily_df = df.groupby('date')[numeric_cols].mean().reset_index()
-            
-            # Create cumulative trends plot
-            fig = go.Figure()
-            colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
-            
-            for i, col in enumerate(numeric_cols):
-                gen_type = col.replace('_MW', '')
+            elif analysis_type == "Generation Mix Changes":
+                st.subheader("🥧 Generation Mix Forecast Changes")
                 
-                fig.add_trace(go.Scatter(
-                    x=daily_df['date'],
-                    y=daily_df[col],
-                    mode='lines',
-                    name=gen_type,
-                    line=dict(color=colors[i % len(colors)], width=2),
-                    hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Generation: %{{y:,.0f}} MW<extra></extra>"
-                ))
-            
-            fig.update_layout(
-                title=f"Daily Average Generation by Source - {today} Forecast (All Regions Combined)",
-                xaxis_title="Forecast Date",
-                yaxis_title="Generation (MW)",
-                hovermode='x unified',
-                height=500
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        
-        elif analysis_type == "Generation Mix Evolution":
-            st.subheader("🥧 Generation Mix Evolution (Forecast)")
-            
-            # Convert to daily totals and calculate percentages
-            df['date'] = df['timestamp'].dt.date
-            numeric_cols = [col for col in df.columns if col.endswith('_MW') and col != 'LOAD_MW']
-            daily_df = df.groupby('date')[numeric_cols].mean().reset_index()
-            
-            # Calculate total generation and percentages
-            daily_df['total_generation'] = daily_df[numeric_cols].sum(axis=1)
-            
-            for col in numeric_cols:
-                daily_df[f"{col}_pct"] = (daily_df[col] / daily_df['total_generation']) * 100
-            
-            # Create stacked area chart
-            fig = go.Figure()
-            colors = ['#ff6b35', '#004e89', '#009639', '#ffa400', '#9b5de5', '#f72585', '#00b4d8', '#90e0ef']
-            
-            for i, col in enumerate(numeric_cols):
-                gen_type = col.replace('_MW', '')
-                pct_col = f"{col}_pct"
+                # Calculate generation mix changes
+                generation_cols = [col for col in changes_df.columns if col.endswith('_MW_new')]
                 
-                fig.add_trace(go.Scatter(
-                    x=daily_df['date'],
-                    y=daily_df[pct_col],
-                    mode='lines',
-                    stackgroup='one',
-                    name=gen_type,
-                    line=dict(color=colors[i % len(colors)]),
-                    hovertemplate=f"{gen_type}<br>Date: %{{x}}<br>Share: %{{y:.1f}}%<extra></extra>"
-                ))
+                if generation_cols:
+                    # Calculate totals for both forecasts
+                    changes_df['total_new'] = changes_df[[col for col in changes_df.columns if col.endswith('_MW_new')]].sum(axis=1)
+                    changes_df['total_old'] = changes_df[[col for col in changes_df.columns if col.endswith('_MW_old')]].sum(axis=1)
+                    
+                    # Calculate mix percentages
+                    mix_changes = []
+                    for col in generation_cols:
+                        gen_type = col.replace('_MW_new', '')
+                        old_col = f"{gen_type}_MW_old"
+                        
+                        if old_col in changes_df.columns:
+                            # Calculate mix percentage for both forecasts
+                            new_mix = (changes_df[col] / changes_df['total_new'] * 100).mean()
+                            old_mix = (changes_df[old_col] / changes_df['total_old'] * 100).mean()
+                            mix_change = new_mix - old_mix
+                            
+                            mix_changes.append({
+                                'Generation Type': gen_type,
+                                'Old Mix (%)': f"{old_mix:.1f}%",
+                                'New Mix (%)': f"{new_mix:.1f}%",
+                                'Mix Change (%)': f"{mix_change:+.1f}%"
+                            })
+                    
+                    if mix_changes:
+                        mix_df = pd.DataFrame(mix_changes)
+                        st.dataframe(mix_df, use_container_width=True)
             
-            fig.update_layout(
-                title=f"Generation Mix Evolution - {today} Forecast (Percentage of Total)",
-                xaxis_title="Forecast Date",
-                yaxis_title="Percentage of Total Generation (%)",
-                hovermode='x unified',
-                height=500
-            )
+            # Summary statistics
+            st.subheader("📊 Forecast Change Statistics")
             
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Raw data section
-        with st.expander("📋 Raw Data Sample"):
-            if analysis_type == "Day-over-Day Changes" and 'changes_df' in locals() and not changes_df.empty:
-                st.dataframe(changes_df.head(20), use_container_width=True)
-            else:
-                # Show daily averages
-                df['date'] = df['timestamp'].dt.date
-                numeric_cols = [col for col in df.columns if col.endswith('_MW')]
-                daily_sample = df.groupby('date')[numeric_cols].mean().reset_index().head(20)
-                st.dataframe(daily_sample, use_container_width=True)
+            change_cols = [col for col in changes_df.columns if col.endswith('_change')]
+            if change_cols:
+                stats_data = []
+                
+                for col in change_cols:
+                    gen_type = col.replace('_MW_change', '')
+                    valid_data = changes_df[col].dropna()
+                    
+                    if not valid_data.empty:
+                        stats_data.append({
+                            'Generation Type': gen_type,
+                            'Avg Change (MW)': f"{valid_data.mean():.1f}",
+                            'Max Increase (MW)': f"{valid_data.max():.1f}",
+                            'Max Decrease (MW)': f"{valid_data.min():.1f}",
+                            'Std Dev (MW)': f"{valid_data.std():.1f}",
+                            'Hours with Data': len(valid_data)
+                        })
+                
+                if stats_data:
+                    stats_df = pd.DataFrame(stats_data)
+                    st.dataframe(stats_df, use_container_width=True)
+            
+            # Raw data section
+            with st.expander("📋 Forecast Comparison Data"):
+                # Show sample of changes
+                display_cols = ['timestamp'] + [col for col in changes_df.columns if '_change' in col or col.endswith('_new') or col.endswith('_old')][:10]
+                st.dataframe(changes_df[display_cols].head(24), use_container_width=True)
 
 st.markdown("---")
-st.markdown(f"**💾 Data Source:** EIA Generation Data (All Regions Aggregated) | **🔄 Data Updates:** Hourly | **📅 Current Filter:** {today} forecast data only")
+st.markdown("**💾 Data Source:** EIA Generation Data (All Regions) | **🔄 Analysis:** Forecast Evolution Tracking")
