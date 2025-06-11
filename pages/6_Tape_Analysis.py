@@ -110,26 +110,28 @@ def analyze_hourly_bid_ask_summary(df):
         if len(group) == 0:
             continue
         
-        # Calculate volumes
-        buy_volume = group[group['side'] == 'B']['size'].sum()  # Bids getting hit
-        sell_volume = group[group['side'] == 'S']['size'].sum()  # Asks getting lifted
-        total_volume = buy_volume + sell_volume
+        # Calculate volumes - Fixed logic based on your data structure
+        # side = 'B' means trade at bid (bids getting hit - selling pressure)
+        # side = 'A' means trade at ask (asks getting lifted - buying pressure)
+        bids_hit_volume = group[group['side'] == 'B']['size'].sum()  # Selling pressure
+        asks_lifted_volume = group[group['side'] == 'A']['size'].sum()  # Buying pressure
+        total_volume = bids_hit_volume + asks_lifted_volume
         
         if total_volume == 0:
             continue
         
         # Determine dominant side with simple logic
-        bid_pct = buy_volume / total_volume
-        ask_pct = sell_volume / total_volume
+        bid_hit_pct = bids_hit_volume / total_volume
+        ask_lifted_pct = asks_lifted_volume / total_volume
         
         # Simple classification
-        if bid_pct > 0.6:  # 60% threshold
+        if bid_hit_pct > 0.6:  # 60% threshold
             dominant_side = "Bids Hit"
-            dominance_strength = bid_pct
+            dominance_strength = bid_hit_pct
             color = "🔴"
-        elif ask_pct > 0.6:
+        elif ask_lifted_pct > 0.6:
             dominant_side = "Asks Lifted"  
-            dominance_strength = ask_pct
+            dominance_strength = ask_lifted_pct
             color = "🟢"
         else:
             dominant_side = "Balanced"
@@ -141,10 +143,10 @@ def analyze_hourly_bid_ask_summary(df):
             'date': hour.date(),
             'hour_of_day': hour.hour,
             'total_volume': total_volume,
-            'buy_volume': buy_volume,
-            'sell_volume': sell_volume,
-            'bid_pct': bid_pct,
-            'ask_pct': ask_pct,
+            'bids_hit_volume': bids_hit_volume,
+            'asks_lifted_volume': asks_lifted_volume,
+            'bid_hit_pct': bid_hit_pct,
+            'ask_lifted_pct': ask_lifted_pct,
             'dominant_side': dominant_side,
             'dominance_strength': dominance_strength,
             'color': color,
@@ -212,8 +214,8 @@ def create_daily_summary_chart(summary_df):
     
     # Daily aggregation
     daily_summary = summary_df.groupby('date').agg({
-        'bid_pct': 'mean',
-        'ask_pct': 'mean', 
+        'bid_hit_pct': 'mean',
+        'ask_lifted_pct': 'mean', 
         'total_volume': 'sum',
         'trade_count': 'sum'
     }).reset_index()
@@ -221,18 +223,18 @@ def create_daily_summary_chart(summary_df):
     # Create subplot
     fig = make_subplots(
         rows=2, cols=1,
-        subplot_titles=['Daily Bid vs Ask Percentage', 'Daily Volume'],
+        subplot_titles=['Daily Bid Hit vs Ask Lifted Percentage', 'Daily Volume'],
         vertical_spacing=0.1
     )
     
     # Bid/Ask percentages
     fig.add_trace(
-        go.Bar(x=daily_summary['date'], y=daily_summary['bid_pct']*100,
+        go.Bar(x=daily_summary['date'], y=daily_summary['bid_hit_pct']*100,
                name='Bids Hit %', marker_color='red', opacity=0.7),
         row=1, col=1
     )
     fig.add_trace(
-        go.Bar(x=daily_summary['date'], y=daily_summary['ask_pct']*100,
+        go.Bar(x=daily_summary['date'], y=daily_summary['ask_lifted_pct']*100,
                name='Asks Lifted %', marker_color='green', opacity=0.7),
         row=1, col=1
     )
@@ -429,14 +431,14 @@ if selected_table:
             # Format for display
             display_df = summary_df.copy()
             display_df['hour_display'] = display_df['hour'].dt.strftime('%Y-%m-%d %H:00')
-            display_df['bid_pct_display'] = display_df['bid_pct'].apply(lambda x: f"{x:.1%}")
-            display_df['ask_pct_display'] = display_df['ask_pct'].apply(lambda x: f"{x:.1%}")
+            display_df['bid_hit_pct_display'] = display_df['bid_hit_pct'].apply(lambda x: f"{x:.1%}")
+            display_df['ask_lifted_pct_display'] = display_df['ask_lifted_pct'].apply(lambda x: f"{x:.1%}")
             display_df['volume_display'] = display_df['total_volume'].apply(lambda x: f"{x:,.0f}")
             
             # Create display columns
             display_columns = [
-                'hour_display', 'color', 'dominant_side', 'bid_pct_display', 
-                'ask_pct_display', 'volume_display', 'trade_count'
+                'hour_display', 'color', 'dominant_side', 'bid_hit_pct_display', 
+                'ask_lifted_pct_display', 'volume_display', 'trade_count'
             ]
             
             # Show recent data first
@@ -449,8 +451,8 @@ if selected_table:
                     'hour_display': 'Hour',
                     'color': 'Status',
                     'dominant_side': 'Market Action',
-                    'bid_pct_display': 'Bids Hit %',
-                    'ask_pct_display': 'Asks Lifted %',
+                    'bid_hit_pct_display': 'Bids Hit %',
+                    'ask_lifted_pct_display': 'Asks Lifted %',
                     'volume_display': 'Total Volume',
                     'trade_count': st.column_config.NumberColumn('Trades', format="%.0f")
                 }
