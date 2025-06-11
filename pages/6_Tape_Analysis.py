@@ -92,11 +92,14 @@ def get_tape_data(table_name: str, limit=50000):
             # Sort by timestamp ascending for analysis
             df = df.sort_values('ts_event').reset_index(drop=True)
             
-            # Add derived columns for analysis
-            df['millisecond'] = df['ts_event'].dt.floor('L')  # Round to millisecond
-            df['second'] = df['ts_event'].dt.floor('S')  # Round to second
-            df['minute'] = df['ts_event'].dt.floor('T')  # Round to minute
-            df['hour'] = df['ts_event'].dt.floor('H')  # Round to hour
+            # Add time grouping columns
+            df['millisecond'] = df['ts_event'].dt.floor('L')
+            df['second'] = df['ts_event'].dt.floor('S')
+            df['minute'] = df['ts_event'].dt.floor('T')
+            df['hour'] = df['ts_event'].dt.floor('H')
+            df['time_5min'] = df['ts_event'].dt.floor('5T')
+            df['time_15min'] = df['ts_event'].dt.floor('15T')
+            df['time_30min'] = df['ts_event'].dt.floor('30T')
             
             # Add notional value
             df['notional'] = df['price'] * df['size'] * df['contract_multiplier']
@@ -107,128 +110,254 @@ def get_tape_data(table_name: str, limit=50000):
         st.error(f"Error fetching data from table '{table_name}': {e}")
         return pd.DataFrame()
 
-def calculate_market_microstructure_metrics(df):
-    """Calculate advanced market microstructure metrics"""
-    if df.empty:
-        return {}
+def analyze_bid_ask_dynamics(df, time_grouping='hour'):
+    """
+    Analyze bid-ask dynamics to determine if bids are getting hit or asks are getting lifted
     
-    # Filter trades only (assuming 'T' action means trade)
+    Logic:
+    - When side='B' (Buy), this typically means someone is hitting the bid (selling at bid price)
+    - When side='S' (Sell), this typically means someone is lifting the ask (buying at ask price)
+    - We'll analyze volume patterns and price movements to confirm this
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Filter for trades only
     trades = df[df['action'] == 'T'].copy() if 'action' in df.columns else df.copy()
     
-    if trades.empty:
-        return {}
+    if trades.empty or 'side' not in trades.columns:
+        return pd.DataFrame()
     
-    metrics = {}
+    # Group by the specified time period
+    time_col = time_grouping
+    if time_col not in trades.columns:
+        time_col = 'hour'  # fallback
     
-    # Basic metrics
-    metrics['total_trades'] = len(trades)
-    metrics['total_volume'] = trades['size'].sum()
-    metrics['total_notional'] = trades['notional'].sum()
-    metrics['avg_trade_size'] = trades['size'].mean()
-    metrics['vwap'] = (trades['price'] * trades['size']).sum() / trades['size'].sum()
+    # Analyze bid-ask dynamics by time period
+    bid_ask_analysis = []
     
-    # Price metrics
-    metrics['price_min'] = trades['price'].min()
-    metrics['price_max'] = trades['price'].max()
-    metrics['price_range'] = metrics['price_max'] - metrics['price_min']
-    metrics['price_std'] = trades['price'].std()
+    for time_period, group in trades.groupby(time_col):
+        if len(group) == 0:
+            continue
+            
+        # Basic metrics
+        total_volume = group['size'].sum()
+        total_trades = len(group)
+        avg_price = group['price'].mean()
+        price_range = group['price'].max() - group['price'].min()
+        
+        # Bid hits vs Ask lifts analysis
+        # In market convention:
+        # - Buy side ('B') often indicates hitting the bid (aggressive sell)
+        # - Sell side ('S') often indicates lifting the ask (aggressive buy)
+        # But this can vary by data provider, so we'll analyze both ways
+        
+        buy_side_trades = group[group['side'] == 'B']
+        sell_side_trades = group[group['side'] == 'S']
+        
+        buy_volume = buy_side_trades['size'].sum() if not buy_side_trades.empty else 0
+        sell_volume = sell_side_trades['size'].sum() if not sell_side_trades.empty else 0
+        
+        buy_count = len(buy_side_trades)
+        sell_count = len(sell_side_trades)
+        
+        # Calculate average prices for each side
+        buy_avg_price = buy_side_trades['price'].mean() if not buy_side_trades.empty else 0
+        sell_avg_price = sell_side_trades['price'].mean() if not sell_side_trades.empty else 0
+        
+        # Determine market pressure
+        volume_imbalance = (buy_volume - sell_volume) / max(total_volume, 1)
+        trade_imbalance = (buy_count - sell_count) / max(total_trades, 1)
+        
+        # Price movement analysis (compared to period start)
+        price_change = group['price'].iloc[-1] - group['price'].iloc[0] if len(group) > 1 else 0
+        price_change_pct = (price_change / group['price'].iloc[0] * 100) if group['price'].iloc[0] != 0 else 0
+        
+        # Determine dominant market action
+        if buy_volume > sell_volume * 1.2:  # 20% threshold
+            market_action = "Bids Getting Hit"
+            action_confidence = abs(volume_imbalance)
+        elif sell_volume > buy_volume * 1.2:
+            market_action = "Asks Getting Lifted"  
+            action_confidence = abs(volume_imbalance)
+        else:
+            market_action = "Balanced"
+            action_confidence = 0.5
+        
+        # Calculate intensity metrics
+        volume_per_minute = total_volume / max((group['ts_event'].max() - group['ts_event'].min()).total_seconds() / 60, 1)
+        trades_per_minute = total_trades / max((group['ts_event'].max() - group['ts_event'].min()).total_seconds() / 60, 1)
+        
+        bid_ask_analysis.append({
+            'time_period': time_period,
+            'total_volume': total_volume,
+            'total_trades': total_trades,
+            'buy_volume': buy_volume,
+            'sell_volume': sell_volume,
+            'buy_count': buy_count,
+            'sell_count': sell_count,
+            'buy_avg_price': buy_avg_price,
+            'sell_avg_price': sell_avg_price,
+            'volume_imbalance': volume_imbalance,
+            'trade_imbalance': trade_imbalance,
+            'market_action': market_action,
+            'action_confidence': action_confidence,
+            'price_change': price_change,
+            'price_change_pct': price_change_pct,
+            'avg_price': avg_price,
+            'price_range': price_range,
+            'volume_per_minute': volume_per_minute,
+            'trades_per_minute': trades_per_minute,
+            'period_start': group['ts_event'].min(),
+            'period_end': group['ts_event'].max()
+        })
     
-    # Time-based metrics
-    time_span = (trades['ts_event'].max() - trades['ts_event'].min()).total_seconds()
-    metrics['time_span_seconds'] = time_span
-    metrics['trades_per_second'] = len(trades) / max(time_span, 1)
-    
-    # Price impact and volatility
-    if len(trades) > 1:
-        trades_sorted = trades.sort_values('ts_event')
-        price_changes = trades_sorted['price'].diff().dropna()
-        metrics['price_volatility'] = price_changes.std()
-        metrics['max_price_move'] = abs(price_changes).max()
-    
-    # Order flow imbalance (if side data available)
-    if 'side' in trades.columns:
-        buy_volume = trades[trades['side'] == 'B']['size'].sum() if 'B' in trades['side'].values else 0
-        sell_volume = trades[trades['side'] == 'S']['size'].sum() if 'S' in trades['side'].values else 0
-        total_directional = buy_volume + sell_volume
-        metrics['buy_volume'] = buy_volume
-        metrics['sell_volume'] = sell_volume
-        metrics['order_flow_imbalance'] = (buy_volume - sell_volume) / max(total_directional, 1)
-    
-    return metrics
+    return pd.DataFrame(bid_ask_analysis)
 
-def calculate_intraday_patterns(df):
-    """Calculate intraday trading patterns"""
-    if df.empty:
-        return pd.DataFrame()
+def create_bid_ask_visualizations(analysis_df):
+    """Create comprehensive bid-ask analysis visualizations"""
+    if analysis_df.empty:
+        return None
     
-    trades = df[df['action'] == 'T'].copy() if 'action' in df.columns else df.copy()
+    # Create subplots
+    fig = make_subplots(
+        rows=4, cols=2,
+        subplot_titles=[
+            'Volume: Bids Hit vs Asks Lifted', 'Market Action Distribution',
+            'Volume Imbalance Over Time', 'Price Changes vs Market Action',
+            'Trading Intensity (Volume/Min)', 'Trade Count Imbalance',
+            'Price Movement vs Volume Imbalance', 'Confidence Levels'
+        ],
+        specs=[[{"secondary_y": False}, {"type": "pie"}],
+               [{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]],
+        vertical_spacing=0.08
+    )
     
-    if trades.empty:
-        return pd.DataFrame()
+    # 1. Volume comparison (Buy vs Sell)
+    fig.add_trace(
+        go.Bar(x=analysis_df['time_period'], y=analysis_df['buy_volume'], 
+               name='Buy Volume (Bids Hit)', marker_color='red', opacity=0.7),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Bar(x=analysis_df['time_period'], y=analysis_df['sell_volume'], 
+               name='Sell Volume (Asks Lifted)', marker_color='green', opacity=0.7),
+        row=1, col=1
+    )
     
-    # Group by hour
-    hourly_stats = trades.groupby('hour').agg({
-        'price': ['mean', 'std', 'min', 'max', 'count'],
-        'size': ['sum', 'mean'],
-        'notional': 'sum'
-    }).round(4)
+    # 2. Market action pie chart
+    action_counts = analysis_df['market_action'].value_counts()
+    fig.add_trace(
+        go.Pie(labels=action_counts.index, values=action_counts.values,
+               name="Market Action", marker_colors=['red', 'green', 'blue']),
+        row=1, col=2
+    )
     
-    hourly_stats.columns = ['price_mean', 'price_std', 'price_min', 'price_max', 'trade_count',
-                           'volume_sum', 'avg_trade_size', 'notional_sum']
+    # 3. Volume imbalance over time
+    colors = ['red' if x < 0 else 'green' if x > 0 else 'gray' for x in analysis_df['volume_imbalance']]
+    fig.add_trace(
+        go.Bar(x=analysis_df['time_period'], y=analysis_df['volume_imbalance'],
+               name='Volume Imbalance', marker_color=colors),
+        row=2, col=1
+    )
     
-    return hourly_stats.reset_index()
-
-def calculate_order_book_analytics(df):
-    """Calculate order book analytics from quote data"""
-    if df.empty:
-        return pd.DataFrame()
+    # 4. Price changes vs market action
+    action_colors = {'Bids Getting Hit': 'red', 'Asks Getting Lifted': 'green', 'Balanced': 'blue'}
+    for action in analysis_df['market_action'].unique():
+        action_data = analysis_df[analysis_df['market_action'] == action]
+        fig.add_trace(
+            go.Scatter(x=action_data['time_period'], y=action_data['price_change_pct'],
+                      mode='markers', name=f'Price Change - {action}',
+                      marker=dict(color=action_colors.get(action, 'gray'), size=8)),
+            row=2, col=2
+        )
     
-    # Filter quotes (non-trade actions)
-    quotes = df[df['action'] != 'T'].copy() if 'action' in df.columns else pd.DataFrame()
+    # 5. Trading intensity
+    fig.add_trace(
+        go.Scatter(x=analysis_df['time_period'], y=analysis_df['volume_per_minute'],
+                  mode='lines+markers', name='Volume/Min', line=dict(color='purple')),
+        row=3, col=1
+    )
     
-    if quotes.empty:
-        return pd.DataFrame()
+    # 6. Trade count imbalance
+    fig.add_trace(
+        go.Bar(x=analysis_df['time_period'], y=analysis_df['trade_imbalance'],
+               name='Trade Count Imbalance', marker_color='orange'),
+        row=3, col=2
+    )
     
-    # Group by timestamp and calculate spread metrics
-    quote_analytics = quotes.groupby('second').agg({
-        'price': ['min', 'max', 'count'],
-        'size': ['sum', 'mean']
-    }).round(4)
+    # 7. Price movement vs volume imbalance (scatter)
+    fig.add_trace(
+        go.Scatter(x=analysis_df['volume_imbalance'], y=analysis_df['price_change_pct'],
+                  mode='markers', name='Price vs Volume Imbalance',
+                  marker=dict(size=analysis_df['total_volume']/1000, color='teal', opacity=0.6)),
+        row=4, col=1
+    )
     
-    quote_analytics.columns = ['bid_price', 'ask_price', 'quote_count', 'total_depth', 'avg_depth']
-    quote_analytics['spread'] = quote_analytics['ask_price'] - quote_analytics['bid_price']
-    quote_analytics['mid_price'] = (quote_analytics['ask_price'] + quote_analytics['bid_price']) / 2
+    # 8. Confidence levels
+    fig.add_trace(
+        go.Bar(x=analysis_df['time_period'], y=analysis_df['action_confidence'],
+               name='Action Confidence', marker_color='lightblue'),
+        row=4, col=2
+    )
     
-    return quote_analytics.reset_index()
+    # Update layout
+    fig.update_layout(
+        height=1200,
+        showlegend=True,
+        title_text="Comprehensive Bid-Ask Dynamics Analysis"
+    )
+    
+    # Add horizontal line at zero for imbalance charts
+    fig.add_hline(y=0, line_dash="dash", line_color="black", row=2, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="black", row=3, col=2)
+    
+    return fig
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Tape Analysis", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Bid-Ask Analysis", page_icon="⚖️", layout="wide")
 
-# Custom CSS for enhanced styling
+# Custom CSS
 st.markdown("""
 <style>
-.metric-card {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+.bid-hit {
+    background: linear-gradient(135deg, #ff6b6b 0%, #ff8e8e 100%);
     padding: 1rem;
     border-radius: 10px;
     color: white;
     text-align: center;
     margin: 0.5rem 0;
 }
-.stMetric > div > div > div > div {
-    font-size: 1.2rem;
+.ask-lifted {
+    background: linear-gradient(135deg, #51cf66 0%, #69db7c 100%);
+    padding: 1rem;
+    border-radius: 10px;
+    color: white;
+    text-align: center;
+    margin: 0.5rem 0;
+}
+.balanced {
+    background: linear-gradient(135deg, #74c0fc 0%, #91c3fd 100%);
+    padding: 1rem;
+    border-radius: 10px;
+    color: white;
+    text-align: center;
+    margin: 0.5rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
 # --- PAGE CONTENT ---
-st.title("📊 High-Frequency Tape Analysis")
+st.title("⚖️ Bid-Ask Dynamics Analysis")
 st.markdown("---")
 
 st.markdown("""
-**Advanced quantitative analysis of high-frequency Natural Gas futures tape data.**
+**Real-time analysis of bid-ask dynamics in Natural Gas futures.**
 
-Real-time market microstructure analytics including order flow, price discovery, and trading patterns.
+This analysis identifies whether market participants are primarily hitting bids (selling pressure) 
+or lifting asks (buying pressure) in each time period.
 """)
 
 # Sidebar controls
@@ -250,11 +379,11 @@ with st.sidebar:
     if st.button("📈 Net Changes", use_container_width=True):
         st.switch_page("pages/5_Net_Changes.py")
         
-    if st.button("📊 Tape Analysis", use_container_width=True):
+    if st.button("⚖️ Bid-Ask Analysis", use_container_width=True):
         st.switch_page("pages/6_Tape_Analysis.py")
     
     st.markdown("---")
-    st.info("📍 **Current Page:** Tape Analysis")
+    st.info("📍 **Current Page:** Bid-Ask Analysis")
     
     st.subheader("📊 Analysis Controls")
     
@@ -273,11 +402,18 @@ with st.sidebar:
         help="Choose a NG futures contract for analysis"
     )
     
-    # Analysis type
-    analysis_type = st.selectbox(
-        "Analysis Type:",
-        ["Market Microstructure", "Order Flow Analysis", "Intraday Patterns", "Price Discovery", "Liquidity Analysis"],
-        help="Choose the type of quantitative analysis"
+    # Time slice selection
+    time_slice = st.selectbox(
+        "Time Slice:",
+        ["hour", "time_30min", "time_15min", "time_5min", "minute"],
+        format_func=lambda x: {
+            "hour": "1 Hour", 
+            "time_30min": "30 Minutes",
+            "time_15min": "15 Minutes", 
+            "time_5min": "5 Minutes",
+            "minute": "1 Minute"
+        }.get(x, x),
+        help="Select time period for bid-ask analysis"
     )
     
     # Data limit for performance
@@ -298,7 +434,7 @@ engine = get_db_engine()
 if not engine: 
     st.stop()
 
-# Main content area
+# Main analysis
 if selected_table:
     
     # Load data
@@ -312,360 +448,120 @@ if selected_table:
         contract_symbol = df['raw_symbol'].iloc[0] if 'raw_symbol' in df.columns else selected_table
         expiration = df['expiration'].iloc[0] if 'expiration' in df.columns else None
         
-        st.subheader(f"📈 {contract_symbol} - Real-Time Analytics")
+        st.subheader(f"⚖️ {contract_symbol} - Bid-Ask Dynamics")
         
-        # Key metrics dashboard
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # Perform bid-ask analysis
+        with st.spinner("Analyzing bid-ask dynamics..."):
+            analysis_df = analyze_bid_ask_dynamics(df, time_slice)
         
-        latest_price = df['price'].iloc[-1] if not df.empty else 0
-        latest_time = df['ts_event'].iloc[-1] if not df.empty else None
-        total_records = len(df)
-        price_range = df['price'].max() - df['price'].min()
-        avg_size = df['size'].mean()
-        
-        with col1:
-            st.metric("Latest Price", f"${latest_price:.3f}")
-        with col2:
-            st.metric("Records", f"{total_records:,}")
-        with col3:
-            st.metric("Price Range", f"${price_range:.3f}")
-        with col4:
-            st.metric("Avg Size", f"{avg_size:,.0f}")
-        with col5:
-            if latest_time:
-                time_ago = (datetime.now() - latest_time.replace(tzinfo=None)).total_seconds()
-                st.metric("Last Update", f"{time_ago:.0f}s ago")
-        
-        if expiration:
-            days_to_expiry = (expiration.date() - datetime.now().date()).days
-            st.info(f"⏰ **Contract Expiration:** {expiration.date()} ({days_to_expiry} days remaining)")
-        
-        if analysis_type == "Market Microstructure":
+        if analysis_df.empty:
+            st.error("Unable to perform bid-ask analysis. Check if 'side' data is available.")
+        else:
+            # Summary metrics
+            total_periods = len(analysis_df)
+            bids_hit_periods = len(analysis_df[analysis_df['market_action'] == 'Bids Getting Hit'])
+            asks_lifted_periods = len(analysis_df[analysis_df['market_action'] == 'Asks Getting Lifted'])
+            balanced_periods = len(analysis_df[analysis_df['market_action'] == 'Balanced'])
             
-            # Calculate microstructure metrics
-            metrics = calculate_market_microstructure_metrics(df)
+            # Overall statistics
+            col1, col2, col3, col4, col5 = st.columns(5)
             
-            if metrics:
-                st.subheader("🔬 Market Microstructure Metrics")
-                
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.metric("Total Trades", f"{metrics.get('total_trades', 0):,}")
-                    st.metric("VWAP", f"${metrics.get('vwap', 0):.3f}")
-                
-                with col2:
-                    st.metric("Total Volume", f"{metrics.get('total_volume', 0):,.0f}")
-                    st.metric("Avg Trade Size", f"{metrics.get('avg_trade_size', 0):.0f}")
-                
-                with col3:
-                    st.metric("Price Volatility", f"{metrics.get('price_volatility', 0):.4f}")
-                    st.metric("Max Price Move", f"${metrics.get('max_price_move', 0):.3f}")
-                
-                with col4:
-                    st.metric("Trades/Second", f"{metrics.get('trades_per_second', 0):.2f}")
-                    if 'order_flow_imbalance' in metrics:
-                        imbalance = metrics['order_flow_imbalance']
-                        st.metric("Order Flow Imbalance", f"{imbalance:.2%}")
+            with col1:
+                st.metric("Total Periods", total_periods)
+            with col2:
+                st.metric("Bids Hit", f"{bids_hit_periods} ({bids_hit_periods/total_periods*100:.1f}%)")
+            with col3:
+                st.metric("Asks Lifted", f"{asks_lifted_periods} ({asks_lifted_periods/total_periods*100:.1f}%)")
+            with col4:
+                st.metric("Balanced", f"{balanced_periods} ({balanced_periods/total_periods*100:.1f}%)")
+            with col5:
+                avg_confidence = analysis_df['action_confidence'].mean()
+                st.metric("Avg Confidence", f"{avg_confidence:.2%}")
             
-            # Price and volume time series
-            trades = df[df['action'] == 'T'].copy() if 'action' in df.columns else df.copy()
+            if expiration:
+                days_to_expiry = (expiration.date() - datetime.now().date()).days
+                st.info(f"⏰ **Contract Expiration:** {expiration.date()} ({days_to_expiry} days remaining)")
             
-            if not trades.empty:
-                fig = make_subplots(
-                    rows=3, cols=1,
-                    subplot_titles=['Price Action', 'Trade Size', 'Cumulative Volume'],
-                    vertical_spacing=0.08,
-                    row_heights=[0.5, 0.25, 0.25]
-                )
+            # Market sentiment analysis
+            st.subheader("📊 Market Sentiment Summary")
+            
+            latest_period = analysis_df.iloc[-1] if not analysis_df.empty else None
+            if latest_period is not None:
+                action = latest_period['market_action']
+                confidence = latest_period['action_confidence']
+                volume_imbalance = latest_period['volume_imbalance']
                 
-                # Price chart
-                fig.add_trace(
-                    go.Scatter(x=trades['ts_event'], y=trades['price'],
-                              mode='lines', name='Price', line=dict(color='#ff6b35', width=1)),
-                    row=1, col=1
-                )
-                
-                # Add VWAP line
-                if 'vwap' in metrics:
-                    fig.add_hline(y=metrics['vwap'], line_dash="dash", line_color="blue",
-                                annotation_text="VWAP", row=1, col=1)
-                
-                # Trade size
-                colors = ['red' if side == 'S' else 'green' for side in trades.get('side', ['gray'] * len(trades))]
-                fig.add_trace(
-                    go.Scatter(x=trades['ts_event'], y=trades['size'],
-                              mode='markers', name='Trade Size',
-                              marker=dict(color=colors, size=4)),
-                    row=2, col=1
-                )
-                
-                # Cumulative volume
-                cumulative_volume = trades['size'].cumsum()
-                fig.add_trace(
-                    go.Scatter(x=trades['ts_event'], y=cumulative_volume,
-                              mode='lines', name='Cumulative Volume',
-                              line=dict(color='purple', width=2)),
-                    row=3, col=1
-                )
-                
-                fig.update_layout(height=700, showlegend=False)
-                fig.update_xaxes(title_text="Time", row=3, col=1)
-                fig.update_yaxes(title_text="Price ($)", row=1, col=1)
-                fig.update_yaxes(title_text="Size", row=2, col=1)
-                fig.update_yaxes(title_text="Volume", row=3, col=1)
-                
+                if action == "Bids Getting Hit":
+                    st.markdown(f"""
+                    <div class="bid-hit">
+                        <h3>🔴 Bids Getting Hit (Selling Pressure)</h3>
+                        <p>Volume Imbalance: {volume_imbalance:.1%} | Confidence: {confidence:.1%}</p>
+                        <p>Market showing selling pressure with {latest_period['buy_volume']:,.0f} volume hitting bids vs {latest_period['sell_volume']:,.0f} lifting asks</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                elif action == "Asks Getting Lifted":
+                    st.markdown(f"""
+                    <div class="ask-lifted">
+                        <h3>🟢 Asks Getting Lifted (Buying Pressure)</h3>
+                        <p>Volume Imbalance: {volume_imbalance:.1%} | Confidence: {confidence:.1%}</p>
+                        <p>Market showing buying pressure with {latest_period['sell_volume']:,.0f} volume lifting asks vs {latest_period['buy_volume']:,.0f} hitting bids</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="balanced">
+                        <h3>⚪ Balanced Market</h3>
+                        <p>Volume Imbalance: {volume_imbalance:.1%} | Confidence: {confidence:.1%}</p>
+                        <p>Market showing balanced activity between bid hits and ask lifts</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # Create visualizations
+            fig = create_bid_ask_visualizations(analysis_df)
+            if fig:
                 st.plotly_chart(fig, use_container_width=True)
-        
-        elif analysis_type == "Order Flow Analysis":
             
-            if 'side' in df.columns:
-                st.subheader("💹 Order Flow Analysis")
-                
-                trades = df[df['action'] == 'T'].copy() if 'action' in df.columns else df.copy()
-                
-                if not trades.empty:
-                    # Order flow by side
-                    buy_trades = trades[trades['side'] == 'B']
-                    sell_trades = trades[trades['side'] == 'S']
-                    
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        buy_vol = buy_trades['size'].sum() if not buy_trades.empty else 0
-                        st.metric("Buy Volume", f"{buy_vol:,.0f}", delta=None)
-                    
-                    with col2:
-                        sell_vol = sell_trades['size'].sum() if not sell_trades.empty else 0
-                        st.metric("Sell Volume", f"{sell_vol:,.0f}", delta=None)
-                    
-                    with col3:
-                        net_flow = buy_vol - sell_vol
-                        st.metric("Net Flow", f"{net_flow:,.0f}", 
-                                delta=f"{net_flow/max(buy_vol + sell_vol, 1):.1%}")
-                    
-                    # Order flow over time
-                    trades['cumulative_buy'] = trades[trades['side'] == 'B']['size'].cumsum()
-                    trades['cumulative_sell'] = trades[trades['side'] == 'S']['size'].cumsum()
-                    
-                    fig = go.Figure()
-                    
-                    if not buy_trades.empty:
-                        fig.add_trace(go.Scatter(
-                            x=buy_trades['ts_event'],
-                            y=buy_trades['size'].cumsum(),
-                            mode='lines',
-                            name='Cumulative Buy Volume',
-                            line=dict(color='green', width=2)
-                        ))
-                    
-                    if not sell_trades.empty:
-                        fig.add_trace(go.Scatter(
-                            x=sell_trades['ts_event'],
-                            y=sell_trades['size'].cumsum(),
-                            mode='lines',
-                            name='Cumulative Sell Volume',
-                            line=dict(color='red', width=2)
-                        ))
-                    
-                    fig.update_layout(
-                        title="Cumulative Order Flow",
-                        xaxis_title="Time",
-                        yaxis_title="Cumulative Volume",
-                        height=400
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Side information not available for order flow analysis")
-        
-        elif analysis_type == "Intraday Patterns":
+            # Detailed table
+            st.subheader("📋 Detailed Bid-Ask Analysis")
             
-            st.subheader("🕐 Intraday Trading Patterns")
+            # Format the dataframe for display
+            display_df = analysis_df.copy()
+            display_df['time_period'] = display_df['time_period'].dt.strftime('%Y-%m-%d %H:%M')
+            display_df['volume_imbalance'] = display_df['volume_imbalance'].apply(lambda x: f"{x:.1%}")
+            display_df['action_confidence'] = display_df['action_confidence'].apply(lambda x: f"{x:.1%}")
+            display_df['price_change_pct'] = display_df['price_change_pct'].apply(lambda x: f"{x:.2f}%")
             
-            patterns = calculate_intraday_patterns(df)
-            
-            if not patterns.empty:
-                # Hourly volume and price patterns
-                fig = make_subplots(
-                    rows=2, cols=2,
-                    subplot_titles=['Hourly Volume', 'Hourly Price Range', 'Trade Count', 'Average Trade Size'],
-                    specs=[[{"secondary_y": False}, {"secondary_y": False}],
-                           [{"secondary_y": False}, {"secondary_y": False}]]
-                )
-                
-                hours = patterns['hour'].dt.hour
-                
-                # Volume
-                fig.add_trace(
-                    go.Bar(x=hours, y=patterns['volume_sum'], name='Volume'),
-                    row=1, col=1
-                )
-                
-                # Price range
-                fig.add_trace(
-                    go.Scatter(x=hours, y=patterns['price_max'], 
-                              mode='lines+markers', name='High', line=dict(color='green')),
-                    row=1, col=2
-                )
-                fig.add_trace(
-                    go.Scatter(x=hours, y=patterns['price_min'], 
-                              mode='lines+markers', name='Low', line=dict(color='red')),
-                    row=1, col=2
-                )
-                
-                # Trade count
-                fig.add_trace(
-                    go.Bar(x=hours, y=patterns['trade_count'], name='Trades'),
-                    row=2, col=1
-                )
-                
-                # Average trade size
-                fig.add_trace(
-                    go.Scatter(x=hours, y=patterns['avg_trade_size'], 
-                              mode='lines+markers', name='Avg Size'),
-                    row=2, col=2
-                )
-                
-                fig.update_layout(height=600, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Display patterns table
-                st.subheader("📊 Hourly Statistics")
-                patterns_display = patterns.copy()
-                patterns_display['hour'] = patterns_display['hour'].dt.strftime('%H:00')
-                st.dataframe(patterns_display, use_container_width=True)
-        
-        elif analysis_type == "Price Discovery":
-            
-            st.subheader("🎯 Price Discovery Analysis")
-            
-            trades = df[df['action'] == 'T'].copy() if 'action' in df.columns else df.copy()
-            
-            if not trades.empty and len(trades) > 10:
-                # Price impact analysis
-                trades_sorted = trades.sort_values('ts_event')
-                trades_sorted['price_change'] = trades_sorted['price'].diff()
-                trades_sorted['volume_bucket'] = pd.qcut(trades_sorted['size'], 
-                                                        q=5, labels=['XS', 'S', 'M', 'L', 'XL'])
-                
-                # Price impact by volume bucket
-                impact_analysis = trades_sorted.groupby('volume_bucket').agg({
-                    'price_change': ['mean', 'std', 'count'],
-                    'size': ['mean', 'sum']
-                }).round(4)
-                
-                impact_analysis.columns = ['avg_price_impact', 'price_impact_std', 'trade_count',
-                                         'avg_size', 'total_volume']
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Price impact chart
-                    fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        x=impact_analysis.index,
-                        y=impact_analysis['avg_price_impact'],
-                        name='Avg Price Impact',
-                        marker_color='orange'
-                    ))
-                    fig.update_layout(
-                        title="Price Impact by Trade Size",
-                        xaxis_title="Volume Bucket",
-                        yaxis_title="Average Price Change"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    # Volume distribution
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Bar(
-                        x=impact_analysis.index,
-                        y=impact_analysis['total_volume'],
-                        name='Total Volume',
-                        marker_color='blue'
-                    ))
-                    fig2.update_layout(
-                        title="Volume Distribution by Bucket",
-                        xaxis_title="Volume Bucket",
-                        yaxis_title="Total Volume"
-                    )
-                    st.plotly_chart(fig2, use_container_width=True)
-                
-                st.dataframe(impact_analysis, use_container_width=True)
-        
-        elif analysis_type == "Liquidity Analysis":
-            
-            st.subheader("💧 Liquidity Analysis")
-            
-            # Calculate liquidity metrics
-            trades = df[df['action'] == 'T'].copy() if 'action' in df.columns else df.copy()
-            
-            if not trades.empty:
-                # Time-based liquidity (trades per minute)
-                minute_stats = trades.groupby('minute').agg({
-                    'size': ['sum', 'count'],
-                    'price': ['std', 'min', 'max']
-                }).round(4)
-                
-                minute_stats.columns = ['volume', 'trade_count', 'price_volatility', 'price_min', 'price_max']
-                minute_stats['liquidity_score'] = minute_stats['volume'] / (minute_stats['price_volatility'] + 0.001)
-                
-                # Liquidity visualization
-                fig = make_subplots(
-                    rows=2, cols=1,
-                    subplot_titles=['Trading Volume per Minute', 'Liquidity Score (Volume/Volatility)'],
-                    vertical_spacing=0.1
-                )
-                
-                fig.add_trace(
-                    go.Bar(x=minute_stats.index, y=minute_stats['volume'], name='Volume'),
-                    row=1, col=1
-                )
-                
-                fig.add_trace(
-                    go.Scatter(x=minute_stats.index, y=minute_stats['liquidity_score'], 
-                              mode='lines', name='Liquidity Score', line=dict(color='purple')),
-                    row=2, col=1
-                )
-                
-                fig.update_layout(height=500, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Liquidity summary
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    avg_liquidity = minute_stats['liquidity_score'].mean()
-                    st.metric("Avg Liquidity Score", f"{avg_liquidity:.2f}")
-                
-                with col2:
-                    most_liquid_minute = minute_stats['liquidity_score'].idxmax()
-                    st.metric("Most Liquid Time", most_liquid_minute.strftime('%H:%M'))
-                
-                with col3:
-                    total_active_minutes = len(minute_stats)
-                    st.metric("Active Minutes", total_active_minutes)
-
-        # Raw data section
-        with st.expander("📋 Raw Tape Data Sample"):
-            # Show last 100 records
-            display_df = df.tail(100).copy()
-            display_df['ts_event'] = display_df['ts_event'].dt.strftime('%H:%M:%S.%f').str[:-3]
+            # Select columns to display
+            display_columns = [
+                'time_period', 'market_action', 'total_volume', 'buy_volume', 'sell_volume',
+                'volume_imbalance', 'action_confidence', 'price_change_pct', 'trades_per_minute'
+            ]
             
             st.dataframe(
-                display_df[['ts_event', 'price', 'size', 'action', 'side', 'raw_symbol']],
-                use_container_width=True
+                display_df[display_columns].round(2),
+                use_container_width=True,
+                column_config={
+                    'time_period': 'Time Period',
+                    'market_action': 'Market Action',
+                    'total_volume': st.column_config.NumberColumn('Total Volume', format="%.0f"),
+                    'buy_volume': st.column_config.NumberColumn('Buy Volume', format="%.0f"),
+                    'sell_volume': st.column_config.NumberColumn('Sell Volume', format="%.0f"),
+                    'volume_imbalance': 'Volume Imbalance',
+                    'action_confidence': 'Confidence',
+                    'price_change_pct': 'Price Change %',
+                    'trades_per_minute': st.column_config.NumberColumn('Trades/Min', format="%.1f")
+                }
             )
             
-            if st.button("📥 Download Full Dataset"):
-                csv = df.to_csv(index=False)
+            # Export functionality
+            if st.button("📥 Download Analysis"):
+                csv = analysis_df.to_csv(index=False)
                 st.download_button(
                     label="Download CSV",
                     data=csv,
-                    file_name=f"{contract_symbol}_tape_data.csv",
+                    file_name=f"{contract_symbol}_bid_ask_analysis_{time_slice}.csv",
                     mime="text/csv"
                 )
 
 st.markdown("---")
-st.markdown("**💾 Data Source:** High-Frequency Tape Data | **🔄 Updates:** Real-time")
+st.markdown("**💾 Data Source:** High-Frequency Tape Data | **🔄 Updates:** Real-time | **📊 Analysis:** Bid-Ask Dynamics")
